@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tb — herdr agent 用の最小タスク表(SQLite 1 ファイル)
-# usage: tb {add|list|show|claim|update|done|block|report|pending|proxy-*|touch|activity|comment|comments|digest|digests|send|flush|outbox|role-*|roles} ...  (tb help で詳細)
+# usage: tb {add|list|show|claim|update|done|block|report|pending|proxy-*|touch|activity|comment|comments|digest|digests|send|flush|outbox|role-*|roles|approval|allow|ask|approve|reject} ...  (tb help で詳細)
 #
 # 環境変数: TB_DB(DB パス) / TB_CONFIG(projects.conf) / HERDR_BIN(herdr の実体。テストでは疑似 herdr)
 # 終了コード: 0 成功 / 1 エラー / 2 使い方の誤り
@@ -25,6 +25,22 @@ need_tools() {
 sql() { sqlite3 -bail -batch -cmd ".timeout ${SQL_TIMEOUT:-5000}" "$DB" "$@"; }
 q()   { local s=${1//\'/\'\'}; printf "'%s'" "$s"; }          # SQL 文字列リテラル化
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# tb send(指揮官 → worker)の送信箱。拒否したものも残す。migrate_db でも使う
+OUTBOX_COLS="         -- tb send(指揮官 → worker)。拒否したものも残す
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_name    TEXT NOT NULL,                 -- herdr agent list から引いた値(自己申告ではない)
+    from_pane    TEXT NOT NULL,
+    from_session TEXT NOT NULL,
+    target       TEXT NOT NULL,
+    kind         TEXT NOT NULL CHECK (kind IN ('task','info','answer')),
+    task_id      TEXT,
+    text         TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (status IN ('pending','queued','sent','denied')),   -- pending = 人の承認待ち
+    reason       TEXT,                          -- 許可・拒否の根拠(routes.conf の行など)
+    sent_at      TEXT,
+    created_at   TEXT NOT NULL
+  "
 
 init_db() {
   mkdir -p "$(dirname "$DB")"
@@ -93,21 +109,14 @@ init_db() {
     result     TEXT NOT NULL CHECK (result IN ('sent','busy','failed')),
     created_at TEXT NOT NULL
   );
-  CREATE TABLE IF NOT EXISTS outbox (         -- tb send(指揮官 → worker)。拒否したものも残す
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    from_name    TEXT NOT NULL,                 -- herdr agent list から引いた値(自己申告ではない)
-    from_pane    TEXT NOT NULL,
-    from_session TEXT NOT NULL,
-    target       TEXT NOT NULL,
-    kind         TEXT NOT NULL CHECK (kind IN ('task','info','answer')),
-    task_id      TEXT,
-    text         TEXT NOT NULL,
-    status       TEXT NOT NULL CHECK (status IN ('queued','sent','denied')),
-    reason       TEXT,                          -- 許可・拒否の根拠(routes.conf の行など)
-    sent_at      TEXT,
-    created_at   TEXT NOT NULL
-  );
+  CREATE TABLE IF NOT EXISTS outbox ($OUTBOX_COLS);
   CREATE INDEX IF NOT EXISTS outbox_status ON outbox(status);
+  CREATE TABLE IF NOT EXISTS approval_changes ( -- tb allow / tb ask の履歴(人が実行したもの)
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    pattern    TEXT NOT NULL,
+    value      TEXT NOT NULL CHECK (value IN ('ask','allow')),
+    created_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS role_briefings ( -- 役割をいつ誰(どのセッション)にどの版で渡したか
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -134,6 +143,14 @@ init_db() {
     digest_id  INTEGER,
     created_at TEXT NOT NULL
   );" >/dev/null
+}
+
+# 古い outbox(pending を持たない CHECK)を作り直す
+migrate_db() {
+  local def; def=$(sql "SELECT sql FROM sqlite_master WHERE type='table' AND name='outbox';")
+  [[ -z $def || $def == *"'pending'"* ]] && return 0
+  sql "BEGIN; CREATE TABLE outbox_new ($OUTBOX_COLS); INSERT INTO outbox_new SELECT * FROM outbox; DROP TABLE outbox; ALTER TABLE outbox_new RENAME TO outbox;
+       CREATE INDEX IF NOT EXISTS outbox_status ON outbox(status); COMMIT;" >/dev/null
 }
 
 valid_id()      { [[ $1 =~ ^T-[A-Za-z0-9_]+-[0-9]{3,}$ ]] || usage "タスク ID は T-<project>-NNN 形式: $1"; }
@@ -942,7 +959,8 @@ outbox_deliver() {  # $1=outbox.id → 0 送信済み / 10 / 11
   sql "UPDATE outbox SET status='sent', sent_at=$(q "$(now)") WHERE id=$oid;"
 }
 
-# 終了コード: 0 送信済み / 10 宛先使用中で outbox に積んだ / 11 送信失敗で outbox に積んだ / 4 ルールで拒否(記録のみ) / 3 送信者を特定できず未保存
+# 終了コード: 0 送信済み / 10 宛先使用中で outbox に積んだ / 11 送信失敗で outbox に積んだ / 4 ルールで拒否(記録のみ)
+#             20 人の承認待ち(approvals.conf が ask。人が tb approve O-<n>) / 3 送信者を特定できず未保存
 cmd_send() {
   [[ $# -ge 1 ]] || usage "send <宛先 agent 名> --text T [--task T-..] [--kind task|info|answer] [--json]"
   local target=$1 text="" tid="" kind=task json=0; shift
@@ -966,8 +984,13 @@ cmd_send() {
   names=$("$HERDR_BIN" agent list 2>/dev/null | jq -r '.result.agents[]?.name // empty' 2>/dev/null) || names=""
   grep -qxF -- "$target" <<<"$names" || die "send: 宛先の agent が herdr にいません: $target(保存しません)"
   local status=queued reason="" rc=0 oid
-  if ! route_allowed "$LABEL_NAME" "$target"; then status=denied; fi
-  reason=$ROUTE_REASON
+  if ! route_allowed "$LABEL_NAME" "$target"; then status=denied; reason=$ROUTE_REASON
+  else
+    reason=$ROUTE_REASON
+    approval_of "send:$kind:$target"
+    [[ $APPROVAL_VALUE == allow ]] || status=pending
+    reason+=" / approvals: $APPROVAL_RULE"
+  fi
   oid=$(sql "INSERT INTO outbox (from_name, from_pane, from_session, target, kind, task_id, text, status, reason, created_at)
     VALUES ($(q "$LABEL_NAME"), $(q "$LABEL_PANE"), $(q "$LABEL_SESSION"), $(q "$target"), $(q "$kind"), NULLIF($(q "$tid"),''),
             $(q "$text"), $(q "$status"), $(q "$reason"), $(q "$(now)"));
@@ -975,12 +998,15 @@ cmd_send() {
   if [[ $status == denied ]]; then
     echo "tb: 送信を拒否しました($reason): O-$oid" >&2
     rc=4
+  elif [[ $status == pending ]]; then
+    echo "tb: 人の承認待ちです(approvals.conf: $APPROVAL_RULE)。人が tb approve O-$oid で届けます" >&2
+    rc=20
   else
     outbox_deliver "$oid" >/dev/null || rc=$?
   fi
   if ((json)); then sql -json "SELECT * FROM outbox WHERE id=$oid;" | jq -c '.[0] | .id = "O-\(.id)"'
   else
-    case $rc in 0) echo "O-$oid sent to $target";; 4) echo "O-$oid denied";; *) echo "O-$oid queued";; esac
+    case $rc in 0) echo "O-$oid sent to $target";; 4) echo "O-$oid denied";; 20) echo "O-$oid pending-approval";; *) echo "O-$oid queued";; esac
   fi
   return $rc
 }
@@ -1007,7 +1033,7 @@ cmd_outbox() {
       *) usage "outbox: 不明な引数 $1";;
     esac
   done
-  if [[ -n $st ]]; then [[ $st =~ ^(queued|sent|denied)$ ]] || usage "outbox: --status は queued|sent|denied"; where="status=$(q "$st")"; fi
+  if [[ -n $st ]]; then [[ $st =~ ^(pending|queued|sent|denied)$ ]] || usage "outbox: --status は pending|queued|sent|denied"; where="status=$(q "$st")"; fi
   if ((json)); then sql -json "SELECT * FROM outbox WHERE $where ORDER BY id DESC LIMIT 100;" | jq -c '(. // [])[] | .id = "O-\(.id)"'
   else sql -nullvalue - -separator $'\t' "SELECT 'O-'||id, status, from_name, target, kind, COALESCE(task_id,'-'), created_at,
          substr(replace(replace(text, char(10), ' '), char(9), ' '),1,80) FROM outbox WHERE $where ORDER BY id DESC LIMIT 100;"
@@ -1124,6 +1150,100 @@ cmd_roles() {
   done < <(jq -r '.result.agents[]? | [.pane_id, (.name // ""), (.agent_session.value // "")] | map(tostring | gsub("[\u001f\n]"; " ")) | join("\u001f")' <<<"$list")
 }
 
+# ---------- approvals(人の承認が要るか。config/approvals.conf) ----------
+APPROVALS=${TB_APPROVALS:-$TB_ROOT/config/approvals.conf}
+APPROVAL_RULE=""
+
+valid_action() { [[ $1 =~ ^[A-Za-z0-9._:*?-]{1,128}$ ]] || usage "操作名に使えない文字があります: $1"; }
+
+# approval_of <操作>: APPROVAL_VALUE に ask|allow、根拠の行を APPROVAL_RULE に入れる(サブシェルで呼ばない)
+APPROVAL_VALUE=ask
+approval_of() {
+  local act=$1 line k v
+  APPROVAL_RULE="(一致なし: 既定 ask)"; APPROVAL_VALUE=ask
+  if [[ -f $APPROVALS ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      line=$(trim "${line%%#*}"); [[ $line == *=* ]] || continue
+      k=$(trim "${line%%=*}"); v=$(trim "${line#*=}")
+      [[ $v == ask || $v == allow ]] || continue
+      # shellcheck disable=SC2053  # glob として比べる
+      if [[ $act == $k ]]; then APPROVAL_RULE="$k = $v"; APPROVAL_VALUE=$v; return 0; fi
+    done <"$APPROVALS"
+  fi
+}
+
+# 人の端末からの実行か(agent の pane からは承認・設定変更をさせない)
+require_human() {
+  local pane=${HERDR_PANE_ID:-} n
+  [[ -n $pane ]] || return 0
+  n=$(agent_name_by_pane "$pane")
+  [[ -z $n ]] || die "$1 は人が自分の端末で実行します(agent '$n' の pane からは実行できません)"
+}
+
+# tb approval <操作>: 1 行目 ask|allow、2 行目 rule:。終了コード 0=allow / 20=ask
+cmd_approval() {
+  [[ $# -eq 1 ]] || usage "approval <操作>(例: send:task:worker1, role:change)"
+  valid_action "$1"
+  approval_of "$1"
+  printf '%s\nrule: %s\n' "$APPROVAL_VALUE" "$APPROVAL_RULE"
+  [[ $APPROVAL_VALUE == allow ]] || return 20
+}
+
+# tb allow|ask <パターン>: 人が「今後は許可/承認制に戻す」を決める。同じパターンの行を書き換え、無ければ先頭に足す
+set_approval() {  # $1=allow|ask $2=パターン
+  local val=$1 pat=$2 tmp found=0 line k
+  valid_action "$pat"
+  require_human "tb $val"
+  mkdir -p "$(dirname "$APPROVALS")"; touch "$APPROVALS"
+  [[ -f $APPROVALS && ! -L $APPROVALS ]] || die "approvals.conf が通常ファイルではありません"
+  tmp=$(mktemp "$APPROVALS.XXXXXX")
+  {
+    while IFS= read -r line || [[ -n $line ]]; do
+      k=$(trim "${line%%#*}"); k=$(trim "${k%%=*}")
+      if [[ $line != \#* && $line == *=* && $k == "$pat" ]]; then
+        ((found)) || printf '%s = %s   # %s に人が変更\n' "$pat" "$val" "$(now)"
+        found=1
+      else
+        printf '%s\n' "$line"
+      fi
+    done <"$APPROVALS"
+  } >"$tmp"
+  if ((!found)); then   # コメントの直後(最初のルールの前)に足す: 先に一致させるため
+    awk -v rule="$pat = $val   # $(now) に人が追加" 'BEGIN{d=0} !d && $0 !~ /^#/ && $0 !~ /^[[:space:]]*$/ {print rule; d=1} {print} END{if(!d) print rule}' "$tmp" >"$tmp.2"
+    mv "$tmp.2" "$tmp"
+  fi
+  mv "$tmp" "$APPROVALS"
+  sql "INSERT INTO approval_changes (pattern, value, created_at) VALUES ($(q "$pat"), $(q "$val"), $(q "$(now)"));" >/dev/null
+  echo "$pat = $val"
+}
+cmd_allow() { [[ $# -eq 1 ]] || usage "allow <操作のパターン>"; set_approval allow "$1"; }
+cmd_ask()   { [[ $# -eq 1 ]] || usage "ask <操作のパターン>"; set_approval ask "$1"; }
+
+# tb approve O-<n> [--always] / tb reject O-<n>: 人の承認待ちの送信を通す・止める
+cmd_approve() {
+  [[ $# -ge 1 && $1 =~ ^O-[0-9]+$ ]] || usage "approve O-<n> [--always]"
+  local oid=${1#O-} always=0 row kind target; shift
+  [[ ${1:-} == --always ]] && always=1
+  require_human "tb approve"
+  row=$(sql -json "SELECT * FROM outbox WHERE id=$oid;" | jq -c '.[0] // empty')
+  [[ -n $row ]] || die "outbox が見つかりません: O-$oid"
+  [[ $(jq -r .status <<<"$row") == pending ]] || die "O-$oid は承認待ちではありません($(jq -r .status <<<"$row"))"
+  kind=$(jq -r .kind <<<"$row"); target=$(jq -r .target <<<"$row")
+  sql "UPDATE outbox SET status='queued', reason=reason||' / 人が承認 $(now)' WHERE id=$oid;"
+  ((always)) && set_approval allow "send:$kind:$target" >/dev/null && echo "send:$kind:$target = allow(今後は承認なし)"
+  local r=0; outbox_deliver "$oid" >/dev/null || r=$?
+  case $r in 0) echo "O-$oid approved and sent to $target";; *) echo "O-$oid approved (宛先使用中のため queued。tb flush で届く)";; esac
+  return 0
+}
+cmd_reject() {
+  [[ $# -eq 1 && $1 =~ ^O-[0-9]+$ ]] || usage "reject O-<n>"
+  local oid=${1#O-}
+  require_human "tb reject"
+  [[ $(sql "SELECT status FROM outbox WHERE id=$oid;") == pending ]] || die "O-$oid は承認待ちではありません"
+  sql "UPDATE outbox SET status='denied', reason=reason||' / 人が却下 $(now)' WHERE id=$oid;"
+  echo "O-$oid rejected"
+}
+
 cmd_help() {
   cat <<'USAGE'
 tb add -p <project> -t <title> [--parent ID] [--owner N] [--session S] [--account A]   → ID を表示
@@ -1162,14 +1282,20 @@ tb digests [D-<n>] [--json]   送ったまとめの一覧 / 全文
 
 指揮官 → worker の送信(herdr agent prompt を直接打たない。送信者は herdr から決まり、config/routes.conf のルールで許可されたものだけ届く):
 tb send <宛先 agent 名> --text T [--task T-..] [--kind task|info|answer] [--json]
-         終了コード 0=送信済み 10=宛先使用中で outbox に積んだ 11=送信失敗で積んだ 4=ルールで拒否 3=送信者を特定できず未保存
+         終了コード 0=送信済み 10=宛先使用中で outbox に積んだ 11=送信失敗で積んだ 4=ルールで拒否 20=人の承認待ち 3=送信者を特定できず未保存
 tb flush            積まれた送信を届ける(tb digest も最初に呼ぶ)
-tb outbox [--status queued|sent|denied] [--json]
+tb outbox [--status pending|queued|sent|denied] [--json]
 
 役割の配布(roles/。SessionStart hook は bin/tb-role-hook 経由):
 tb role-context --source startup|resume|clear|compact --session-id S   hook 用。渡すときだけ hook の JSON を出す。常に 0
 tb role-broadcast [agent 名 ...]   動いている agent に役割の置き場所を送る(同じ版を渡し済みのセッションは飛ばす)
 tb roles [--json]                  agent ごとの役割ファイルと、渡した版が最新か(current|outdated|never|no-role)
+
+人の承認(config/approvals.conf。<操作のパターン> = ask|allow、最初に一致した行、無一致は ask):
+tb approval <操作>        1 行目 ask|allow、2 行目 rule:。終了コード 0=allow 20=ask(例: send:task:worker1, role:change, setup:hooks)
+tb allow <パターン>       今後は承認なしにする(人の端末からだけ)。tb ask <パターン> で承認制に戻す
+tb approve O-<n> [--always]   承認待ちの送信を届ける。--always なら send:<kind>:<宛先> を allow にする
+tb reject O-<n>               承認待ちの送信を却下する
 USAGE
 }
 
@@ -1180,11 +1306,12 @@ main() {
     touch) cmd_touch "$@"; return 0;;   # 常に 0。ツールの有無チェックや init_db の失敗でも止めない
     role-context) ( need_tools && init_db ) >/dev/null 2>&1 && cmd_role-context "$@" 2>/dev/null; return 0;;   # hook 用。常に 0
     add|list|show|claim|update|done|block|report|pending|activity) ;;
-    proxy-request|proxy-list|proxy-resolve|proxy-check|comment|comments|digest|digests|send|flush|outbox|role-broadcast|roles) ;;
+    proxy-request|proxy-list|proxy-resolve|proxy-check|comment|comments|digest|digests|send|flush|outbox|role-broadcast|roles|approval|allow|ask|approve|reject) ;;
     *) usage "不明なコマンド: $cmd";;
   esac
   need_tools
   init_db
+  migrate_db
   "cmd_$cmd" "$@"
 }
 main "$@"

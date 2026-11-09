@@ -442,6 +442,18 @@ check("未ログインの /api/notifications は 401(リダイレクトせず中
       r[0] == 401 and "Location" not in r[1] and "質問" not in r[2] and "alpha" not in r[2], str(r[:2]))
 check("無効な Cookie の /api/notifications も 401", Client(port).get("/api/notifications", cookie="herdr_webui_session=nope")[0] == 401)
 check("POST /api/notifications は 405", cl.raw("POST", "/api/notifications", {"a": "b"})[0] == 405)
+# 送信の承認待ち(tb send が approvals.conf で ask になったもの)
+_c = sqlite3.connect(env["WEBUI_TB_DB"])
+_c.executescript("CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, from_name TEXT, from_pane TEXT, from_session TEXT, target TEXT,"
+                 " kind TEXT, task_id TEXT, text TEXT, status TEXT, reason TEXT, sent_at TEXT, created_at TEXT);"
+                 "INSERT INTO outbox (from_name,target,kind,text,status,created_at) VALUES ('conductor','w1','task','調べて <b>x</b>','pending','t');"
+                 "INSERT INTO outbox (from_name,target,kind,text,status,created_at) VALUES ('conductor','w1','task','済','sent','t');")
+_c.commit(); _c.close()
+time.sleep(3.2)  # 通知のキャッシュ切れを待つ
+r = cl.get("/api/notifications")
+_it = [it for it in json.loads(r[2])["items"] if it["id"].startswith("o:")] if r[0] == 200 else []
+check("送信の承認待ちが通知に出る(承認コマンド付き)", [it["id"] for it in _it] == ["o:1"] and "tb approve O-1" in _it[0]["body"], str(_it))
+check("送信の承認待ちは /notifications でエスケープ", "&lt;b&gt;x&lt;/b&gt;" in cl.get("/notifications")[2])
 r = cl.get("/notify.js")
 check("/notify.js が 200 の JavaScript", r[0] == 200 and r[1].get("Content-Type", "").startswith("text/javascript")
       and "Notification" in r[2] and "/api/notifications" in r[2], str(r[:2]))
