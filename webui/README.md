@@ -1,11 +1,12 @@
-# webui — herdr 進捗の Web UI(第 1 段: 読み取り専用)
+# webui — herdr 進捗の Web UI
 
 agent・タスク・報告・定期実行・台帳を、ブラウザで見るための小さなサーバー。
 Python 3 の標準ライブラリだけで動く(依存なし)。
 
 - サーバー側で HTML を組み立てる複数ページ構成(SPA ではない)。自動更新は `<meta http-equiv="refresh">`(8 秒)。
 - 全ページに共通ナビと、承認待ち件数のバッジ(報告の question/blocked + `pending-human` の代行依頼 + blocked の agent)。
-- **読み取り専用**。POST/PUT/DELETE/PATCH は 405。承認ボタンはない(承認は人が別の経路で行う)。
+- **変更できるのは定期実行のスケジュールだけ**(`/jobs/<job>`: 間隔・時間帯・曜日・一時停止)。それ以外は読み取り専用で、POST/PUT/DELETE/PATCH は 405。
+  承認ボタンはない(承認は人が別の経路で行う)。
 
 ## 起動
 
@@ -72,7 +73,7 @@ rm webui/run/auth.json webui/run/sessions.json
 - `sessions.json`: セッション値の SHA-256 と有効期限だけ。Cookie の値そのものは保存しない。
 - Cookie は `HttpOnly; SameSite=Strict; Path=/`。
 
-POST を受け付けるのは `/login`・`/setup`・`/logout`・`/reset` だけ。これらは `Origin`/`Referer` が自分のオリジン
+POST を受け付けるのは `/login`・`/setup`・`/logout`・`/reset` と `/jobs/<job>` だけ(`/jobs/<job>` はログイン中のセッションに結びついたトークンが必要)。これらは `Origin`/`Referer` が自分のオリジン
 (`127.0.0.1:<port>`)であることと、フォームの隠しトークン(署名付き・30 分で失効)を確認する。それ以外の
 POST/PUT/DELETE/PATCH は 405。
 
@@ -91,7 +92,8 @@ POST/PUT/DELETE/PATCH は 405。
 | `/agents/<名前>` | 状態、担当タスク、直近の出力(`herdr agent read`)、最終入力/停止、`session_id`、`claude --resume <session_id>` |
 | `/tasks`, `/tasks/<id>` | タスク一覧(`?project=` `?status=` で絞り込み)と詳細(報告・成果物・代行依頼) |
 | `/inbox` | 要対応(question・blocked・pending-human・blocked の agent)を上に、直近の報告を下に |
-| `/jobs` | `scheduler/logs/*.log` の各 job の最終記録と最後の実行 |
+| `/jobs` | 各 job の実際に効く設定(間隔・時間帯・曜日・有効/一時停止)、最終記録と最後の実行 |
+| `/jobs/<job>` | スケジュールの変更フォーム(自動更新しない)。保存先は `scheduler/settings/<job>.settings`、次の分から反映。「conf の値に戻す」で settings を消す |
 | `/ledger` | `conductor/dispatch.jsonl` の直近 30 行 |
 
 名前の無い agent は `pane_id`(例: `w2:p3`)が名前の代わりになる。未知の URL は 404。
@@ -100,7 +102,8 @@ POST/PUT/DELETE/PATCH は 405。
 
 - `herdr agent list` / `herdr agent read`(結果は 3 秒キャッシュ)
 - `taskboard/data/tasks.db`(`mode=ro` で開く。無い・壊れていても落ちず、空の表になる)
-- `scheduler/logs/*.log`、`conductor/dispatch.jsonl`
+- `scheduler/logs/*.log`、`scheduler/jobs/*.conf`(`scheduler/bin/show.sh` 経由)、`conductor/dispatch.jsonl`
+- 書き込むのは `scheduler/settings/<job>.settings` だけ。入力は数値・`HH:MM`・決まった曜日だけを受け付け、scheduler が読めない内容なら元に戻す
 
 「滞留」は、`working` のまま最終入力(`agent_activity.last_prompt_at`)から 30 分を超えて停止がない agent。
 
@@ -153,7 +156,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.herdr-webui.plist
 | `WEBUI_SESSION_TTL` / `WEBUI_LOCK_MAX` / `WEBUI_LOCK_SEC` | `43200` / `5` / `300` | ログインの有効秒数 / ロックまでの失敗回数 / ロック秒数 |
 | `WEBUI_FAIL_DELAY` | `1` | ログイン・再設定の失敗時の遅延(秒) |
 | `HERDR_BIN` | `herdr` | herdr の実行ファイル(テストで疑似に差し替え) |
-| `WEBUI_TB_DB` / `WEBUI_SCHED_LOGS` / `WEBUI_DISPATCH` / `WEBUI_RUN_DIR` | 兄弟ディレクトリ / `webui/run` | データ源と `run/` の場所 |
+| `WEBUI_TB_DB` / `WEBUI_SCHED_LOGS` / `WEBUI_SCHED_JOBS` / `WEBUI_SCHED_SETTINGS` / `WEBUI_DISPATCH` / `WEBUI_RUN_DIR` | 兄弟ディレクトリ / `webui/run` | データ源・settings・`run/` の場所 |
 
 ## テスト
 
@@ -166,6 +169,6 @@ herdr は `tests/fake/herdr`(疑似)、DB・ログは一時ディレクトリ。
 未ログインは /login へ、初回設定は 1 回だけ、パスワード 12 文字未満の拒否、ハッシュに平文を含まない、0600、ロックアウト、
 パスワード再設定(許可なし・期限切れ・シンボリックリンクの拒否、成功後の許可削除とセッション失効、時刻の注入)、期限切れ・再起動後・ログアウトのセッション、`next` の外部 URL 無視、Origin 不一致・CSRF トークン無しの POST の拒否、他の POST 等は 405、不正な Host 403、XSS・ANSI のエスケープ、DB 不在・破損・herdr 失敗でも落ちない、未知の URL は 404。
 
-## 第 1 段でできていないこと
+## まだできていないこと
 
 ブラウザからの承認操作、端末リンク(ttyd は採用しない)、`pane_agent_status_changed` の購読(いまは数秒おきの取得)は第 2 段以降。

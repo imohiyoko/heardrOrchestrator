@@ -41,6 +41,8 @@ check() {
   else failn=$((failn + 1)); printf 'FAIL %-46s %s want=%s got=%s\n' "$desc" "$now" "$want" "$got"; fi
 }
 
+ok() { if [ "$2" = "$3" ]; then pass=$((pass + 1)); echo "ok   $1"; else failn=$((failn + 1)); echo "FAIL $1 want=[$3] got=[$2]"; fi; }
+
 THU="2026-11-05"; SAT="2026-11-07"; SUN="2026-11-08"; MON="2026-11-09"
 # 窓の境界(木曜、状態 idle)
 check "境界 08:55 は窓の外"        skipped_window t "$THU 08:55" idle
@@ -71,14 +73,20 @@ check "先頭が / の本文は failed"     failed         slash "$THU 12:00" id
 [ ! -e "$LOG_DIR/t.log" ] && { pass=$((pass + 1)); echo "ok   DRY_RUN はログを書かない"; } \
   || { failn=$((failn + 1)); echo "FAIL DRY_RUN がログを書いた"; }
 
-# gen-plist: エントリ数と境界
+# gen-plist: 毎分起動(空の StartCalendarInterval)。時間帯・間隔は tick.sh が判定する
 OUT_DIR="$TMP/gen" bash bin/gen-plist.sh t >/dev/null
 P="$TMP/gen/local.herdr-sched-t.plist"
-n=$(grep -c '<key>Hour</key>' "$P")
-has() { grep -q "<key>Hour</key><integer>$1</integer><key>Minute</key><integer>$2</integer>" "$P"; }
-[ "$n" = 145 ] && has 21 0 && has 9 0 && ! has 21 5 && ! has 8 55 \
-  && { pass=$((pass + 1)); echo "ok   plist: 145 エントリ、09:00/21:00 を含み 08:55/21:05 を含まない"; } \
-  || { failn=$((failn + 1)); echo "FAIL plist: entries=$n"; }
+grep -A1 '<key>StartCalendarInterval</key>' "$P" | grep -q '<dict/>' && ! grep -q '<key>Hour</key>' "$P" \
+  && { pass=$((pass + 1)); echo "ok   plist: 毎分起動(Hour/Minute を焼き込まない)"; } \
+  || { failn=$((failn + 1)); echo "FAIL plist: 毎分起動になっていない"; }
+
+# 間隔: 窓の始端から INTERVAL_MIN 刻みの回だけ実行する
+check "間隔: 09:05 は実行(5 分刻み)"   sent             t "$THU 09:05" idle
+check "間隔: 09:07 は刻みの外"          skipped_interval t "$THU 09:07" idle
+NOW="$THU 09:07" bash bin/tick.sh t
+ok_q() { [ ! -e "$LOG_DIR/t.log" ] && { pass=$((pass + 1)); echo "ok   $1"; } || { failn=$((failn + 1)); echo "FAIL $1"; }; }
+ok_q "刻みの外は(DRY_RUN 以外でも)ログを書かない"
+NOW="$THU 08:00" bash bin/tick.sh t; ok_q "窓の外は(DRY_RUN 以外でも)ログを書かない"
 
 # START/END 形式と SCHED_* 上書き
 cat >"$JOBS_DIR/se.conf" <<'C'
@@ -98,9 +106,27 @@ export SCHED_WINDOW=13:00-14:00
 check "SCHED_WINDOW 上書き: 13:30 は実行" sent        t "$THU 13:30" idle
 check "SCHED_WINDOW 上書き: 09:00 は外"   skipped_window t "$THU 09:00" idle
 unset SCHED_WINDOW
-n=$(SCHED_INTERVAL_MIN=10 OUT_DIR="$TMP/gen2" bash bin/gen-plist.sh t | grep -o '[0-9]* entries')
-[ "$n" = "73 entries" ] && { pass=$((pass + 1)); echo "ok   SCHED_INTERVAL_MIN=10 で 73 エントリ"; } \
-  || { failn=$((failn + 1)); echo "FAIL SCHED_INTERVAL_MIN: $n"; }
+check "SCHED_INTERVAL_MIN=10: 09:10 は実行" sent t "$THU 09:10" idle
+SCHED_INTERVAL_MIN=10 check "SCHED_INTERVAL_MIN=10: 09:05 は刻みの外" skipped_interval t "$THU 09:05" idle
+
+# settings/<job>.settings(Web UI が書く上書き)
+export SCHED_SETTINGS_DIR="$TMP/settings"; mkdir -p "$SCHED_SETTINGS_DIR"
+printf 'INTERVAL_MIN=15\nSTART=10:00\nEND=11:00\nDAYS=weekdays\n' >"$SCHED_SETTINGS_DIR/t.settings"
+check "settings: 間隔 15 分の 10:15 は実行"    sent             t "$THU 10:15" idle
+check "settings: 10:05 は刻みの外"            skipped_interval t "$THU 10:05" idle
+check "settings: 時間帯 10-11 の 09:00 は外"  skipped_window   t "$THU 09:00" idle
+check "settings: weekdays の土曜は外"         skipped_window   t "2026-11-07 10:15" idle
+SCHED_INTERVAL_MIN=30 check "SCHED_* は settings より優先" skipped_interval t "$THU 10:15" idle
+printf 'ENABLED=0\n' >"$SCHED_SETTINGS_DIR/t.settings"
+check "settings: ENABLED=0 は一時停止"        skipped_disabled t "$THU 09:00" idle
+ok "show.sh: 実際に効く設定" "$(bash bin/show.sh t | jq -c '[.interval_min,.start,.end,.enabled,.overridden]')" '[5,"09:00","21:00",false,true]'
+for bad in 'INTERVAL_MIN=5; rm -rf /' 'COMMAND=echo pwned' 'START=10:00' 'DAYS=$(id)' 'ENABLED=yes'; do
+  printf '%s\n' "$bad" >"$SCHED_SETTINGS_DIR/t.settings"
+  DRY_RUN=1 NOW="$THU 09:00" bash bin/tick.sh t >/dev/null 2>&1; ok "settings: 不正な行は拒否(exit 2): $bad" "$?" 2
+done
+ln -sf /etc/hostname "$SCHED_SETTINGS_DIR/sym.settings"; cp "$JOBS_DIR/t.conf" "$JOBS_DIR/sym.conf"
+DRY_RUN=1 NOW="$THU 09:00" bash bin/tick.sh sym >/dev/null 2>&1; ok "settings: シンボリックリンクは拒否" "$?" 2
+rm -rf "$SCHED_SETTINGS_DIR"; unset SCHED_SETTINGS_DIR
 
 # ---- COMMAND 型
 mkcmd() { printf '%s\nWINDOW=%s\nINTERVAL_MIN=2\n' "$2" "${3:-00:00-23:59}" >"$JOBS_DIR/$1.conf"; }
@@ -112,12 +138,11 @@ mkcmd slow "COMMAND='sleep 5'
 COMMAND_TIMEOUT=1"
 mkcmd long "COMMAND='head -c 2000 /dev/zero | tr \"\\\\0\" x'"
 mkcmd lock "COMMAND='sleep 2'"
-ok() { if [ "$2" = "$3" ]; then pass=$((pass + 1)); echo "ok   $1"; else failn=$((failn + 1)); echo "FAIL $1 want=[$3] got=[$2]"; fi; }
 last() { tail -1 "$LOG_DIR/$1.log"; }
 bash bin/tick.sh both >/dev/null 2>&1; ok "COMMAND と TARGET の同時指定はエラー(exit 2)" "$?" 2
 check "COMMAND 型 DRY_RUN は実行せず ran" ran cmd "$THU 12:00"
 check "COMMAND 型 窓の外は skipped_window" skipped_window cmdok "$THU 08:55"
-check "COMMAND 型 終日 23:59 は実行" ran cmd "$THU 23:59"
+check "COMMAND 型 終日 23:58 は実行(2 分刻み)" ran cmd "$THU 23:58"
 NOW="$THU 12:00" bash bin/tick.sh cmd
 ok "stdout/stderr/exit を記録" "$(last cmd | jq -r '[.action,.exit,.stdout,.stderr]|join("|")' | tr '\n' '~')" "failed|3|out-line|err-line~"
 NOW="$THU 12:00" bash bin/tick.sh long
@@ -131,7 +156,6 @@ ok "多重実行は skipped_locked" "$(jq -r .action "$LOG_DIR/lock.log" | sort 
 ok "実行後にロックが残らない" "$([ -e "$LOG_DIR/lock.lock.d" ] && echo left || echo none)" none
 mkdir "$LOG_DIR/cmd.lock.d"; echo 999999 >"$LOG_DIR/cmd.lock.d/pid"
 NOW="$THU 12:00" bash bin/tick.sh cmd; ok "stale lock は回収して実行" "$(last cmd | jq -r .action)" failed
-n=$(OUT_DIR="$TMP/gen3" bash bin/gen-plist.sh cmd | grep -o '[0-9]* entries'); ok "終日 2 分刻みは 720 エントリ" "$n" "720 entries"
 
 echo "---- pass=$pass fail=$failn"
 [ "$failn" = 0 ]

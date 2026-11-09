@@ -10,3 +10,4 @@ auth.json
 sessions.json
 token
 scheduler/jobs/*.conf
+scheduler/settings/

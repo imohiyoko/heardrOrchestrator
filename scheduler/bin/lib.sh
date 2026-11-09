@@ -5,6 +5,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 SCHED_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JOBS_DIR="${JOBS_DIR:-$SCHED_ROOT/jobs}"
 LOG_DIR="${LOG_DIR:-$SCHED_ROOT/logs}"
+# Web UI などが書く上書き設定(<job>.settings)の置き場
+SETTINGS_DIR="${SCHED_SETTINGS_DIR:-$SCHED_ROOT/settings}"
 HERDR="${HERDR_BIN:-/opt/homebrew/bin/herdr}"
 export HERDR_BIN_PATH="${HERDR_BIN_PATH:-$HERDR}"
 
@@ -18,13 +20,39 @@ hm_to_min() {
   echo $((h * 60 + m))
 }
 
+# 上書き設定 $SETTINGS_DIR/<job>.settings を読む。bash として実行せず、決まったキーと値の形だけを受け付ける。
+# キー: INTERVAL_MIN / START / END / DAYS / ENABLED(0 で一時停止)。結果は S_<キー> に入る
+load_settings() {
+  local f="$SETTINGS_DIR/$JOB.settings" line k v
+  S_INTERVAL_MIN=""; S_START=""; S_END=""; S_DAYS=""; S_ENABLED=""
+  [ -e "$f" ] || return 0
+  [ -f "$f" ] && [ ! -L "$f" ] || die "$JOB: settings が通常ファイルではない: $f"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" =~ ^([A-Z_]+)=(.*)$ ]] || die "$JOB: settings の行が不正: $f"
+    k=${BASH_REMATCH[1]}; v=${BASH_REMATCH[2]}
+    case "$k" in
+      INTERVAL_MIN) [[ "$v" =~ ^[0-9]{1,4}$ ]] || die "$JOB: settings の INTERVAL_MIN が不正"; S_INTERVAL_MIN=$v ;;
+      START) [[ "$v" =~ ^[0-9]{2}:[0-9]{2}$ ]] || die "$JOB: settings の START が不正"; S_START=$v ;;
+      END) [[ "$v" =~ ^[0-9]{2}:[0-9]{2}$ ]] || die "$JOB: settings の END が不正"; S_END=$v ;;
+      DAYS) [[ "$v" =~ ^[A-Za-z][A-Za-z\ ,]{0,39}$ ]] || die "$JOB: settings の DAYS が不正"; S_DAYS=$v ;;
+      ENABLED) [[ "$v" =~ ^[01]$ ]] || die "$JOB: settings の ENABLED は 0 か 1"; S_ENABLED=$v ;;
+      *) die "$JOB: settings に使えないキー: $k" ;;
+    esac
+  done <"$f"
+  if [ -n "$S_START$S_END" ] && { [ -z "$S_START" ] || [ -z "$S_END" ]; }; then
+    die "$JOB: settings の START と END は両方書く"
+  fi
+}
+
 # ジョブ定義を読み込み、既定値を埋めて検証する。
+# 優先順: jobs/<job>.conf < settings/<job>.settings < 環境変数 SCHED_*
 load_job() {
   JOB="${1:-}"
   [[ "$JOB" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "ジョブ名が不正: '$JOB'"
   JOB_CONF="$JOBS_DIR/$JOB.conf"
   [ -f "$JOB_CONF" ] || die "ジョブ定義がない: $JOB_CONF"
-  unset TARGET PROMPT PROMPT_FILE COMMAND COMMAND_TIMEOUT WINDOW START END INTERVAL_MIN DAYS SKIP_IF TZ
+  unset TARGET PROMPT PROMPT_FILE COMMAND COMMAND_TIMEOUT WINDOW START END INTERVAL_MIN DAYS SKIP_IF TZ ENABLED
   # shellcheck disable=SC1090
   source "$JOB_CONF"
   # WINDOW(HH:MM-HH:MM) を START/END に分解。conf が START/END を直接持つならそちらを優先
@@ -32,6 +60,12 @@ load_job() {
     [[ "$WINDOW" =~ ^([0-9:]+)-([0-9:]+)$ ]] || die "$JOB: WINDOW は HH:MM-HH:MM"
     START=${BASH_REMATCH[1]}; END=${BASH_REMATCH[2]}
   fi
+  load_settings
+  if [ -n "$S_START" ]; then START=$S_START; END=$S_END; fi
+  INTERVAL_MIN=${S_INTERVAL_MIN:-${INTERVAL_MIN:-}}
+  DAYS=${S_DAYS:-${DAYS:-}}
+  ENABLED=${S_ENABLED:-${ENABLED:-1}}
+  [[ "$ENABLED" =~ ^[01]$ ]] || die "$JOB: ENABLED は 0 か 1"
   # 一時的な上書き: SCHED_WINDOW / SCHED_START / SCHED_END / SCHED_INTERVAL_MIN
   if [ -n "${SCHED_WINDOW:-}" ]; then
     [[ "$SCHED_WINDOW" =~ ^([0-9:]+)-([0-9:]+)$ ]] || die "SCHED_WINDOW は HH:MM-HH:MM"

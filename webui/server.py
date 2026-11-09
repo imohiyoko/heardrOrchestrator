@@ -40,6 +40,9 @@ TB_DB = lambda: cfg("WEBUI_TB_DB", os.path.join(HERDR_ROOT, "taskboard", "data",
 SCHED_LOGS = lambda: cfg("WEBUI_SCHED_LOGS", os.path.join(HERDR_ROOT, "scheduler", "logs"))  # noqa: E731
 DISPATCH = lambda: cfg("WEBUI_DISPATCH", os.path.join(HERDR_ROOT, "conductor", "dispatch.jsonl"))  # noqa: E731
 RUN_DIR = lambda: cfg("WEBUI_RUN_DIR", os.path.join(ROOT, "run"))  # noqa: E731
+SCHED_ROOT = os.path.join(HERDR_ROOT, "scheduler")
+SCHED_JOBS = lambda: cfg("WEBUI_SCHED_JOBS", os.path.join(SCHED_ROOT, "jobs"))  # noqa: E731
+SCHED_SETTINGS = lambda: cfg("WEBUI_SCHED_SETTINGS", os.path.join(SCHED_ROOT, "settings"))  # noqa: E731
 
 # ---------------------------------------------------------------- 出力の無害化
 
@@ -281,7 +284,7 @@ NAV = [("/", "概要"), ("/agents", "agent"), ("/tasks", "タスク"), ("/inbox"
        ("/jobs", "定期実行"), ("/ledger", "台帳")]
 
 
-def page(title, body, path, badge, logout=""):
+def page(title, body, path, badge, logout="", refresh=True):
     links = []
     for href, label in NAV:
         on = path == href or (href != "/" and path.startswith(href + "/"))
@@ -291,12 +294,12 @@ def page(title, body, path, badge, logout=""):
         links.append(f'<a href="{href}"{" class=on" if on else ""}>{label}{b}</a>')
     return (
         "<!doctype html><html lang=ja><head><meta charset=utf-8>"
-        f'<meta http-equiv="refresh" content="{REFRESH_SEC}">'
+        + (f'<meta http-equiv="refresh" content="{REFRESH_SEC}">' if refresh else "") +
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         '<meta name=referrer content=same-origin>'
         f"<title>{e(title)} - herdr</title><style>{CSS}</style></head><body>"
         f"<nav>{''.join(links)}{logout}</nav><main><h1>{e(title)}</h1>{body}"
-        f'<p class=note>自動更新 {REFRESH_SEC} 秒 / 読み取り専用 / 機密を含みうる画面です</p></main></body></html>'
+        f'<p class=note>{f"自動更新 {REFRESH_SEC} 秒" if refresh else "自動更新なし"} / 変更できるのは定期実行の設定だけ / 機密を含みうる画面です</p></main></body></html>'
     )
 
 
@@ -530,23 +533,147 @@ def page_inbox(_qs):
     return "報告・承認待ち", body
 
 
-def page_jobs(_qs):
-    d = SCHED_LOGS()
-    rows = []
+JOB_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+HM_RE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
+DAY_TOKENS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+DAY_PRESETS = (("daily", "毎日"), ("weekdays", "平日"), ("weekends", "土日"))
+
+
+def job_names():
     try:
-        names = sorted(n for n in os.listdir(d) if n.endswith(".log"))
+        return sorted(n[:-5] for n in os.listdir(SCHED_JOBS()) if n.endswith(".conf") and JOB_RE.fullmatch(n[:-5]))
     except OSError:
-        names = []
-    for n in names:
-        recs = parse_jsonl(tail_lines(os.path.join(d, n), 200))
-        if not recs:
-            continue
-        last = recs[-1]
-        ran = [r for r in recs if r.get("action") in ("ran", "failed")]
-        lr = ran[-1] if ran else None
-        rows.append([e(last.get("job") or n[:-4]), e(last.get("ts")), e(last.get("action")), e(last.get("reason")),
-                     (f'{e(lr.get("ts"))} / {e(lr.get("action"))} (exit {e(lr.get("exit"))})' if lr else "-")])
-    return "定期実行", table(["job", "最終記録", "action", "reason", "最後の実行"], rows)
+        return []
+
+
+def job_info(name):
+    """scheduler/bin/show.sh で、実際に効く設定(conf + settings)を得る。(dict, None) か (None, エラー文)。"""
+    env = dict(os.environ, JOBS_DIR=SCHED_JOBS(), SCHED_SETTINGS_DIR=SCHED_SETTINGS())
+    for k in ("SCHED_WINDOW", "SCHED_START", "SCHED_END", "SCHED_INTERVAL_MIN"):
+        env.pop(k, None)
+    try:
+        r = subprocess.run(["bash", os.path.join(SCHED_ROOT, "bin", "show.sh"), name], env=env,
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, "設定を読めませんでした"
+    if r.returncode != 0:
+        return None, clean(r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "設定を読めませんでした")
+    try:
+        return json.loads(r.stdout), None
+    except ValueError:
+        return None, "設定を読めませんでした"
+
+
+def job_last(name):
+    recs = parse_jsonl(tail_lines(os.path.join(SCHED_LOGS(), name + ".log"), 200))
+    last = recs[-1] if recs else None
+    ran = [r for r in recs if r.get("action") in ("ran", "failed", "sent")]
+    return last, (ran[-1] if ran else None)
+
+
+def page_jobs(_qs):
+    names = job_names()
+    try:
+        logged = sorted(n[:-4] for n in os.listdir(SCHED_LOGS()) if n.endswith(".log") and JOB_RE.fullmatch(n[:-4]))
+    except OSError:
+        logged = []
+    rows = []
+    for n in sorted(set(names) | set(logged)):
+        info, err = job_info(n) if n in names else (None, "jobs/ に conf がない")
+        last, lr = job_last(n)
+        if info:
+            sched = (f'{e(info["interval_min"])} 分おき / {e(info["start"])}-{e(info["end"])} / {e(info["days"])}'
+                     + (" <span class=note>(Web UI で変更済み)</span>" if info.get("overridden") else ""))
+            st = "有効" if info.get("enabled") else '<span class=warn>一時停止</span>'
+            what = e(info["target"]) if info["kind"] == "prompt" else "コマンド"
+        else:
+            sched, st, what = f'<span class=warn>{e(err)}</span>', "-", "-"
+        rows.append([f'<a href="/jobs/{quote(n)}">{e(n)}</a>' if n in names else e(n), what, sched, st,
+                     (f'{e(last.get("ts"))} {e(last.get("action"))} {e(last.get("reason"))}' if last else "-"),
+                     (f'{e(lr.get("ts"))} / {e(lr.get("action"))}' + (f' (exit {e(lr.get("exit"))})' if "exit" in lr else "")
+                      if lr else "-")])
+    note = "<p class=note>job 名を開くと、間隔・時間帯・曜日・一時停止を変更できます(次の分から反映)。</p>"
+    return "定期実行", note + table(["job", "宛先", "間隔 / 時間帯 / 曜日", "状態", "最終記録", "最後の実行"], rows)
+
+
+def page_job(name, csrf, error="", saved=False):
+    """1 ジョブの設定フォーム(自動更新しない)。"""
+    info, err = job_info(name)
+    if not info:
+        return "定期実行: " + name, err_html(err or error) + '<p><a href="/jobs">一覧へ</a></p>'
+    days = info["days"]
+    preset = days if days in dict(DAY_PRESETS) else ""
+    opts = "".join(f'<option value={k}{" selected" if preset == k else ""}>{e(v)}</option>' for k, v in DAY_PRESETS)
+    opts += f'<option value=custom{" selected" if not preset else ""}>曜日を指定</option>'
+    toks = set(days.lower().replace(",", " ").split()) if not preset else set()
+    checks = "".join(f'<label><input type=checkbox name=day_{t} value=1{" checked" if t in toks else ""}> {t.capitalize()}</label> '
+                     for t in DAY_TOKENS)
+    hid = f'<input type=hidden name=csrf value="{e(csrf)}">'
+    form = (
+        f'<form method=post action="/jobs/{quote(name)}">{hid}<input type=hidden name=action value=save>'
+        f'<p><label>間隔(分)<br><input type=number name=interval_min min=1 max=1440 required value="{e(info["interval_min"])}"></label></p>'
+        f'<p><label>開始 <input type=time name=start required value="{e(info["start"])}"></label> '
+        f'<label>終了 <input type=time name=end required value="{e(info["end"])}"></label>'
+        f' <span class=note>両端を含む。日またぎは不可。TZ は {e(info["tz"])}</span></p>'
+        f'<p><label>曜日 <select name=days>{opts}</select></label> {checks}</p>'
+        f'<p><label><input type=checkbox name=enabled value=1{" checked" if info["enabled"] else ""}> 有効(外すと一時停止)</label></p>'
+        '<button type=submit>保存</button></form>'
+        f'<form method=post action="/jobs/{quote(name)}" style="margin-top:12px">{hid}<input type=hidden name=action value=reset>'
+        '<button type=submit>conf の値に戻す</button></form>')
+    what = f'agent <code>{e(info["target"])}</code> にプロンプトを送る' if info["kind"] == "prompt" else "コマンドを実行する"
+    msg = '<p class=note>保存しました。次の分から反映されます。</p>' if saved else ""
+    return "定期実行: " + name, (
+        err_html(error) + msg + f"<p>{what}ジョブ。{'Web UI で変更済み。' if info.get('overridden') else ''}</p>" + form +
+        "<p class=note>変更できるのはスケジュールだけです(宛先・本文・コマンドは jobs/*.conf を人が編集)。"
+        f'保存先: <code>scheduler/settings/{e(name)}.settings</code></p><p><a href="/jobs">一覧へ</a></p>')
+
+
+def save_job_settings(name, form):
+    """フォームを検証して settings を書く。エラー文か None。"""
+    path = os.path.join(SCHED_SETTINGS(), name + ".settings")
+    if os.path.islink(path):
+        return "settings がシンボリックリンクです。手で確認してください"
+    old = None
+    if os.path.exists(path):
+        with open(path) as f:
+            old = f.read()
+    if form.get("action") == "reset":
+        if old is not None:
+            os.unlink(path)
+        return None
+    iv, start, end = form.get("interval_min", "").strip(), form.get("start", "").strip(), form.get("end", "").strip()
+    if not iv.isdigit() or not 1 <= int(iv) <= 1440:
+        return "間隔は 1〜1440 分の整数で入力してください"
+    if not HM_RE.fullmatch(start) or not HM_RE.fullmatch(end):
+        return "開始・終了は HH:MM で入力してください"
+    if start > end:
+        return "開始は終了より前にしてください(日またぎは未対応)"
+    days = form.get("days", "")
+    if days == "custom":
+        picked = [t for t in DAY_TOKENS if form.get("day_" + t) == "1"]
+        if not picked:
+            return "曜日を 1 つ以上選んでください"
+        days = " ".join(t.capitalize() for t in picked)
+    elif days not in dict(DAY_PRESETS):
+        return "曜日の指定が不正です"
+    enabled = "1" if form.get("enabled") == "1" else "0"
+    body = f"# Web UI が書く上書き設定({time.strftime('%Y-%m-%dT%H:%M:%S%z')})\n" \
+           f"INTERVAL_MIN={int(iv)}\nSTART={start}\nEND={end}\nDAYS={days}\nENABLED={enabled}\n"
+    os.makedirs(SCHED_SETTINGS(), exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(body)
+    os.replace(tmp, path)
+    _, err = job_info(name)
+    if err:  # scheduler 側で読めない設定は残さない
+        if old is None:
+            os.unlink(path)
+        else:
+            with open(path, "w") as f:
+                f.write(old)
+        return "scheduler が設定を受け付けませんでした: " + err
+    return None
 
 
 def page_ledger(_qs):
@@ -740,6 +867,13 @@ class Handler(BaseHTTPRequestHandler):
         logout = (f'<form method=post action="/logout"><input type=hidden name=csrf value="{e(a.form_token("s:" + sh))}">'
                   '<button type=submit>ログアウト</button></form>')
         try:
+            m = re.fullmatch(r"/jobs/([^/]+)/?", unquote(path))
+            if m:  # 設定フォーム(自動更新しない)
+                name = m.group(1)
+                if not JOB_RE.fullmatch(name) or name not in job_names():
+                    return self._send(404, page("見つかりません", "<p>そのページはありません。</p>", "", badge_count(), logout))
+                title, body = page_job(name, a.form_token("s:" + sh), saved=qs.get("saved") == ["1"])
+                return self._send(200, page(title, body, "/jobs/" + name, badge_count(), logout, refresh=False))
             r = route(unquote(path), qs)
             if r is None:
                 return self._send(404, page("見つかりません", "<p>そのページはありません。</p>", "", badge_count(), logout))
@@ -749,7 +883,7 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write(f"internal error: {type(ex).__name__}\n")
             self._text(500, "Internal Server Error")
 
-    # ---- POST(/login /setup /logout だけ)
+    # ---- POST(/login /setup /logout /reset と、定期実行の設定 /jobs/<job> だけ)
     def _post(self, path):
         a = self.auth
         if not self._origin_ok():
@@ -758,11 +892,27 @@ class Handler(BaseHTTPRequestHandler):
         if form is None:
             return self._text(413, "Payload Too Large")
         sh = self._session()
-        ctx = "s:" + sh if path == "/logout" and sh else "anon"
+        job = path.startswith("/jobs/")
+        if job and not sh:
+            return self._redirect("/login")
+        ctx = "s:" + sh if (path == "/logout" or job) and sh else "anon"
         if not a.check_form_token(form.get("csrf"), ctx):
             if path == "/logout" and not sh:
                 return self._redirect("/login")
             return self._text(403, "Forbidden: フォームの有効期限切れです。画面を開き直してください")
+        if job:
+            name = path[len("/jobs/"):]
+            if not JOB_RE.fullmatch(name) or name not in job_names():
+                return self._text(404, "Not Found")
+            try:
+                err = save_job_settings(name, form)
+            except OSError:
+                err = "設定を書き込めませんでした"
+            if err:
+                title, body = page_job(name, a.form_token("s:" + sh), error=err)
+                return self._send(400, page(title, body, path, badge_count(), refresh=False))
+            sys.stderr.write(f"jobs: settings {'reset' if form.get('action') == 'reset' else 'saved'} {name}\n")
+            return self._redirect(f"/jobs/{name}?saved=1")
         if path == "/logout":
             a.destroy_session(self._session_token())
             return self._redirect("/login", [self._cookie("", 0)])
@@ -841,10 +991,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return self._text(403, "Forbidden")
         path = urlsplit(self.path).path
-        if self.command == "POST" and path in ("/login", "/setup", "/logout", "/reset"):
+        if self.command == "POST" and (path in ("/login", "/setup", "/logout", "/reset")
+                                       or re.fullmatch(r"/jobs/[A-Za-z0-9][A-Za-z0-9_-]{0,63}", path)):
             return self._post(path)
         if self.command not in ("GET", "HEAD"):
-            return self._text(405, "Method Not Allowed(読み取り専用です)", [("Allow", "GET, HEAD")])
+            return self._text(405, "Method Not Allowed(定期実行の設定以外は読み取り専用です)", [("Allow", "GET, HEAD")])
         self._get()
 
     do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _handle
