@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# tb-hook — Claude Code の hook(UserPromptSubmit / Stop)から直接呼ぶ薄いラッパ
+#
+# stdin の JSON から必要な 4 項目(hook_event_name, session_id, cwd, prompt_id)だけを jq で取り、
+# env の HERDR_PANE_ID / HERDR_TAB_ID / HERDR_WORKSPACE_ID と合わせて `tb touch` を呼ぶ。
+#   - prompt 本文(.prompt)や last_assistant_message は変数にも入れない
+#   - env 全体・stdin 全文はどこにも出さない(CLAUDE_CODE_MESSAGING_TOKEN などが env にあるため)
+#   - 常に終了コード 0、標準出力・標準エラーは空(UserPromptSubmit の標準出力は文脈に入りうる)
+TB=$(dirname "${BASH_SOURCE[0]}")/tb
+{
+  input=$(cat)
+  fields=""
+  command -v jq >/dev/null && fields=$(jq -r '[(.hook_event_name // ""), (.session_id // ""), (.cwd // ""), (.prompt_id // "")]
+    | map(tostring | gsub("[[:cntrl:]]"; " ")) | join("\u001f")' <<<"$input")
+  IFS=$'\x1f' read -r ev sid cwd pid <<<"$fields"
+  args=(--event "$ev" --session-id "$sid")
+  [[ -z ${HERDR_PANE_ID:-} ]] || args+=(--pane-id "$HERDR_PANE_ID")
+  [[ -z ${HERDR_TAB_ID:-} ]] || args+=(--tab-id "$HERDR_TAB_ID")
+  [[ -z ${HERDR_WORKSPACE_ID:-} ]] || args+=(--workspace-id "$HERDR_WORKSPACE_ID")
+  [[ -z $cwd ]] || args+=(--cwd "$cwd")
+  [[ -z $pid ]] || args+=(--prompt-id "$pid")
+  "$TB" touch "${args[@]}"
+} >/dev/null 2>&1
+exit 0

@@ -1,0 +1,10 @@
+#!/bin/bash
+# テスト用の疑似 herdr。FAKE_HERDR_DIR の list.json / read.txt を返すだけ。
+d="${FAKE_HERDR_DIR:?}"
+[ -f "$d/fail" ] && { echo "boom" >&2; exit 3; }
+case "$1 $2" in
+  "agent list") cat "$d/list.json" ;;
+  "agent read") if [ "$3" = "w1:p2" ] && [ -f "$d/dialog.txt" ]; then cat "$d/dialog.txt"; else cat "$d/read.txt"; fi ;;
+  "workspace list") echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"ws-label"}]}}' ;;
+  *) echo "fake herdr: unsupported: $*" >&2; exit 2 ;;
+esac

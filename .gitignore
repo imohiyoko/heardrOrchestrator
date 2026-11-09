@@ -1,0 +1,12 @@
+data/
+run/
+logs/
+generated/
+__pycache__/
+*.db
+*.log
+.env
+auth.json
+sessions.json
+token
+scheduler/jobs/*.conf

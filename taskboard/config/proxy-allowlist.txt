@@ -1,0 +1,6 @@
+# read-only commands a conductor may run on behalf of a worker (prefix match)
+gh pr view
+gh pr diff
+git log
+git status
+herdr agent list

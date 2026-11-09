@@ -1,0 +1,9 @@
+# 定期監視。watch agent に 5 分ごとに依頼する(09:00-21:00、両端を含む)。
+TARGET=worker-a
+# 先頭を / にしないこと(スラッシュコマンドと解釈される)
+PROMPT='次のファイルを参照して実行してください: /path/to/watch-prompt.md'
+WINDOW=09:00-21:00
+INTERVAL_MIN=5
+DAYS=daily
+SKIP_IF="working blocked"
+TZ=Asia/Tokyo

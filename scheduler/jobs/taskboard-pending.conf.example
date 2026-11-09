@@ -1,0 +1,9 @@
+# taskboard の未報告の完了・未配送の報告を再送する(冪等)。agent を介さず決定論的に実行。
+# 注意: COMMAND は bash -c でそのまま実行される。このファイルは人が管理し、外部入力を埋め込まない。
+# xargs は空入力ではコマンドを起動しない(-r)。
+COMMAND='cd /path/to/taskboard && bin/tb pending --ids | xargs -r -n1 bin/tb report'
+COMMAND_TIMEOUT=60
+WINDOW=00:00-23:59
+INTERVAL_MIN=2
+DAYS=daily
+TZ=Asia/Tokyo
