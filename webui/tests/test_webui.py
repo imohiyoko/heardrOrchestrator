@@ -149,6 +149,7 @@ def make_db(path):
     # 本物のスキーマ(taskboard/schema/*.sql を tb と同じ順に流す)。手書きのスキーマは持たない
     for f in sorted(glob.glob(os.path.join(SCHEMA_DIR, "[0-9][0-9][0-9]_*.sql"))):
         c.executescript(open(f, encoding="utf-8").read())
+        c.execute(f"PRAGMA user_version={int(os.path.basename(f)[:3])}")  # tb と同じく版を記録(tb が移行し直さない)
     c.execute("INSERT INTO tasks VALUES ('T-1','pj','題 " + XSS + "','alpha','11111111-2222-3333-4444-555555555555',"
               "NULL,'in_progress',NULL,'[\"a.md\"]',NULL,NULL,NULL,'2026-11-06T00:00:00Z','2026-11-06T00:00:00Z')")
     c.execute("INSERT INTO comments (task_id,kind,text,from_name,from_pane,from_session,created_at) VALUES "
@@ -386,8 +387,9 @@ check("ログイン済みで /login は元のページへ", cl.get("/login?next=
 for path in PAGES:
     s_, h, b = cl.get(path)
     check(f"GET {path} が 200", s_ == 200, str(s_))
+    # 入力欄(対応済みにする)があるページは自動更新しない
     check(f"{path}: 共通ナビ・meta refresh・バッジ",
-          'http-equiv="refresh"' in b and 'href="/ledger"' in b and 'class="badge"' in b, path)
+          (('http-equiv="refresh"' in b) != ('action="/resolve"' in b)) and 'href="/ledger"' in b and 'class="badge"' in b, path)
     check(f"{path}: スクリプトは同一オリジンの notify.js だけ",
           re.findall(r"<script[^>]*>", b, re.I) == [NOTIFY_TAG[:-9]] and "<script" not in no_js(b).lower()
           and "<img" not in b.lower(), str(re.findall(r"<script[^>]*>", b, re.I)))
@@ -397,7 +399,8 @@ for path in PAGES:
 b = cl.get("/agents/alpha")[2]
 check("エスケープされて表示", "&lt;script&gt;alert(1)&lt;/script&gt;" in b)
 check("ANSI/OSC を除去(本文は残る)", "red" in b and "evil title" not in b and "\\x1b" not in b)
-check("resume コマンド", "claude --resume 11111111-2222-3333-4444-555555555555" in b)
+check("resume コマンドは出さず、使わないよう注意する", "claude --resume 1111" not in b and "claude --resume を実行しないでください" in b)
+check("attach 欄にインラインのスクリプトがない", "onfocus" not in b)
 check("名前に HTML を含む agent も安全", "&lt;img src=x onerror=alert(2)&gt;" in cl.get("/agents")[2])
 check("pane_id フォールバックの URL", cl.get("/agents/w1%3Ap3")[0] == 200)
 check("未知の agent は 404", cl.get("/agents/nope")[0] == 404)
@@ -516,6 +519,32 @@ check("名前なしは pane_id で attach", "herdr agent attach w1:p3" in idle[2
 check("フォームはログアウトだけ(承認・send-keys のボタンなし)",
       re.findall(r"<form[^>]*action=\"([^\"]+)\"", bl[2]) == ["/logout"] and bl[2].lower().count("<button") == 1)
 check("inbox の blocked 行から詳細へリンク", "#approval" in inbox)
+
+# ---- 報告を対応済みにする(/resolve。書き込みは tb resolve が行う)
+ib = cl.get("/inbox")[2]
+check("inbox に「対応済みにする」(C-1)", 'action="/resolve"' in ib and 'name=id value="1"' in ib)
+check("タスク画面にも「対応済みにする」", 'action="/resolve"' in cl.get("/tasks/T-1")[2])
+good = {"id": "1", "note": "決めた <b>x</b>", "back": "/inbox"}
+check("CSRF 無しの /resolve は拒否", cl.raw("POST", "/resolve", good)[0] == 403)
+check("Origin 不一致の /resolve は拒否", cl.raw("POST", "/resolve", {**good, "csrf": cl.csrf("/inbox")}, origin="http://evil.example")[0] == 403)
+check("未ログインの /resolve は /login へ", Client(port).raw("POST", "/resolve", good)[0] == 302)
+check("ログイン画面の CSRF(anon)は使えない", cl.raw("POST", "/resolve", {**good, "csrf": cl.csrf("/login")})[0] == 403)
+check("id が数字でなければ 400", cl.raw("POST", "/resolve", {**good, "id": "1;x", "csrf": cl.csrf("/inbox")})[0] == 400)
+r = cl.raw("POST", "/resolve", {**good, "csrf": cl.csrf("/inbox")})
+check("対応済みにすると inbox へ戻る", r[0] == 302 and r[1].get("Location") == "/inbox?resolved=done", str(r[:2]))
+_c = sqlite3.connect(env["WEBUI_TB_DB"])
+_row = _c.execute("SELECT resolved_at IS NOT NULL, resolved_note FROM comments WHERE id=1").fetchone()
+_c.close()
+check("tb resolve で DB に記録(メモも)", _row == (1, "決めた <b>x</b>"), str(_row))
+time.sleep(3.2)  # needs_human のキャッシュ切れを待つ
+ib = cl.get("/inbox?resolved=done")[2]
+check("対応済みは要対応から消え、バッジが減る", '<span class="badge">2</span>' in ib and 'name=id value="1"' not in ib)
+check("結果の表示と、メモのエスケープ", "対応済みにしました" in ib and "決めた &lt;b&gt;x&lt;/b&gt;" in cl.get("/tasks/T-1")[2])
+check("緊急通知からも消える", "c:1" not in [it["id"] for it in json.loads(cl.get("/api/notifications")[2])["items"]])
+r = cl.raw("POST", "/resolve", {**good, "back": "//evil.example/x", "csrf": cl.csrf("/inbox")})
+check("2 回目は already、戻り先は自サイトだけ", r[0] == 302 and r[1].get("Location") == "/inbox?resolved=already", str(r[:2]))
+r = cl.raw("POST", "/resolve", {"id": "999", "back": "/tasks/T-1", "csrf": cl.csrf("/inbox")})
+check("存在しない報告は error", r[0] == 302 and r[1].get("Location") == "/tasks/T-1?resolved=error", str(r[:2]))
 
 # ---- 他のメソッド
 for method in ("POST", "PUT", "DELETE", "PATCH"):

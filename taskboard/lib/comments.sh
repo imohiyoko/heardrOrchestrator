@@ -83,12 +83,13 @@ cmd_comment() {
 }
 
 cmd_comments() {
-  local tid="" kind="" und=0 json=0 where="1=1"
+  local tid="" kind="" und=0 open=0 json=0 where="1=1"
   if [[ ${1:-} == T-* ]]; then tid=$1; shift; valid_id "$tid"; fi
   while [[ $# -gt 0 ]]; do
     case $1 in
       --kind) need_arg "$@"; kind=$2; shift 2;;
       --undelivered) und=1; shift;;
+      --open) open=1; shift;;
       --json) json=1; shift;;
       *) usage "comments: 不明な引数 $1";;
     esac
@@ -96,12 +97,37 @@ cmd_comments() {
   [[ -z $tid ]] || where+=" AND task_id=$(q "$tid")"
   if [[ -n $kind ]]; then [[ " $COMMENT_KINDS " == *" $kind "* ]] || usage "comments: --kind は $COMMENT_KINDS"; where+=" AND kind=$(q "$kind")"; fi
   ((und)) && where+=" AND delivered_at IS NULL"
+  ((open)) && where+=" AND kind IN ('question','blocked') AND resolved_at IS NULL"   # 人の対応待ち
   if ((json)); then
     sql -json "SELECT * FROM comments WHERE $where ORDER BY id;" | jq -c '(. // [])[] | .deliverables |= fromjson | .id = "C-\(.id)"'
   else
-    # needs_human: question/blocked は人の判断・承認待ち
-    sql -separator $'\t' "SELECT 'C-'||id, kind, CASE WHEN kind IN ('question','blocked') THEN 'needs-human' ELSE '-' END,
+    # needs-human: 未対応の question/blocked(人の判断・承認待ち)。resolved: 人が対応済みにしたもの
+    sql -separator $'\t' "SELECT 'C-'||id, kind, CASE WHEN resolved_at IS NOT NULL THEN 'resolved'
+           WHEN kind IN ('question','blocked') THEN 'needs-human' ELSE '-' END,
       CASE WHEN delivered_at IS NULL THEN 'undelivered' ELSE 'delivered' END, task_id, from_name,
       replace(replace(text, char(10), ' '), char(9), ' ') FROM comments WHERE $where ORDER BY id;"
   fi
+}
+
+# tb resolve C-<n> [-m メモ]: 人が question / blocked の報告を対応済みにする。agent の pane からは拒否(require_human)
+# 終了コード 0 対応済みにした / すでに対応済み、1 拒否・見つからない・対象外の種別、2 使い方
+cmd_resolve() {
+  [[ $# -ge 1 ]] || usage "resolve <C-n> [-m <メモ>]"
+  local ref=${1#C-} note="" row kind at; shift
+  [[ $ref =~ ^[0-9]+$ ]] || usage "resolve: ID は C-<数字>: $ref"
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -m|--message) need_arg "$@"; note=$2; shift 2;;
+      *) usage "resolve: 不明な引数 $1";;
+    esac
+  done
+  ((${#note} <= 500)) || usage "resolve: メモは 500 字まで"
+  require_human "tb resolve"
+  row=$(sql -json "SELECT kind, resolved_at FROM comments WHERE id=$ref;" | jq -c '.[0] // empty')
+  [[ -n $row ]] || die "報告が見つかりません: C-$ref"
+  kind=$(jq -r .kind <<<"$row"); at=$(jq -r '.resolved_at // ""' <<<"$row")
+  [[ $kind == question || $kind == blocked ]] || die "対応済みにできるのは question / blocked だけです(C-$ref は $kind)"
+  if [[ -n $at ]]; then echo "C-$ref はすでに対応済みです($at)"; return 0; fi
+  sql "UPDATE comments SET resolved_at=$(q "$(now)"), resolved_note=NULLIF($(q "$note"),'') WHERE id=$ref AND resolved_at IS NULL;"
+  echo "C-$ref resolved"
 }

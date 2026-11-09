@@ -64,12 +64,18 @@ def parse_jsonl(lines):
     return out
 
 
+def has_resolution():
+    """comments に resolved_at があるか(スキーマ 003 より前の DB では無い。tb を一度動かせば足される)。"""
+    return any(r.get("name") == "resolved_at" for r in q("PRAGMA table_info(comments)"))
+
+
 def needs_human():
-    """承認待ち: question/blocked の報告(未完了タスク)、pending-human の代行依頼、blocked の agent。"""
+    """承認待ち: 未対応の question/blocked の報告(未完了タスク)、pending-human の代行依頼、blocked の agent。"""
     comments = q(
         "SELECT c.*, t.status AS task_status, t.title AS task_title FROM comments c "
         "LEFT JOIN tasks t ON t.id=c.task_id WHERE c.kind IN ('question','blocked') "
-        "AND COALESCE(t.status,'') != 'done' ORDER BY c.id DESC LIMIT 100")
+        "AND COALESCE(t.status,'') != 'done'" + (" AND c.resolved_at IS NULL" if has_resolution() else "") +
+        " ORDER BY c.id DESC LIMIT 100")
     proxies = q("SELECT * FROM proxy_requests WHERE status='pending-human' ORDER BY id DESC LIMIT 100")
     agents, _ = get_agents()
     blocked = [a for a in agents if a.get("agent_status") == "blocked"]

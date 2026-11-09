@@ -10,6 +10,7 @@ from .config import DISPATCH, JOB_RE, REFRESH_SEC, SCHED_LOGS, STALL_MIN
 from .sanitize import clean, e
 from .herdr import agent_key, agent_session, get_agents, read_agent, workspace_label
 from .data import NOTIFY_POLL_SEC, activity_for, db_conn, needs_human, parse_jsonl, q, stalled, tail_lines, tasks_for_agent, urgent_items
+from .actions import NOTE_MAX
 from .jobs import DAY_PRESETS, DAY_TOKENS, job_info, job_last, job_names
 
 
@@ -54,7 +55,7 @@ def page(title, body, path, badge, logout="", refresh=True):
         f"<title>{e(title)} - herdr</title><style>{CSS}</style>"
         '<script src="/notify.js" defer></script></head><body>'
         f"<nav>{''.join(links)}{logout}</nav><main><h1>{e(title)}</h1>{body}"
-        f'<p class=note>{f"自動更新 {REFRESH_SEC} 秒" if refresh else "自動更新なし"} / 変更できるのは定期実行の設定だけ / 機密を含みうる画面です / Chrome 通知は「緊急通知」で設定</p></main></body></html>'
+        f'<p class=note>{f"自動更新 {REFRESH_SEC} 秒" if refresh else "入力欄があるので自動更新なし(再読み込みで更新)"} / 変更できるのは定期実行の設定と報告の「対応済み」だけ / 機密を含みうる画面です / Chrome 通知は「緊急通知」で設定</p></main></body></html>'
     )
 
 
@@ -154,7 +155,6 @@ def page_agent(key):
     act = activity_for(a)
     tasks = tasks_for_agent(a)
     sid = agent_session(a) or (tasks[0]["session_id"] if tasks and tasks[0].get("session_id") else None)
-    resume = f"claude --resume {shlex.quote(str(sid))}" if sid else None
     info = [
         ("状態", state_html(a.get("agent_status")) + (' <span class=warn>滞留</span>' if stalled(a, act) else "")),
         ("場所", f'workspace {e(workspace_label(a.get("workspace_id")) or "-")} ({e(a.get("workspace_id"))})'
@@ -164,7 +164,6 @@ def page_agent(key):
         ("最終入力", e(act.get("last_prompt_at") if act else "-")),
         ("最終停止", e(act.get("last_stop_at") if act else "-")),
         ("session_id", f"<code>{e(sid)}</code>" if sid else "-"),
-        ("resume コマンド", f"<code>{e(resume)}</code>" if resume else "-"),
     ]
     body = err_html(err) + "<table>" + "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in info) + "</table>"
     attach = "herdr agent attach " + shlex.quote(str(agent_key(a)))
@@ -177,7 +176,8 @@ def page_agent(key):
         body += ('<p class=note>要約・加工なしの端末表示です。承認の入力はブラウザ上では行えません。'
                  '下のコマンドで手元の herdr から開いて、人が操作してください。</p>')
     body += ('<h2>手元で開く</h2><p><input type=text readonly size=60 value="' + e(attach) +
-             '" onfocus="this.select()"> <span class=note>クリックで全選択 → コピーして手元の端末で実行</span></p>')
+             '"> <span class=note>欄をクリックして全選択(Cmd+A)→ コピーして手元の端末で実行</span></p>'
+             '<p class=warn>別のターミナルで claude --resume を実行しないでください。動いている agent と会話が枝分かれします。</p>')
     body += "<h2>担当タスク</h2>" + table(
         ["タスク", "PJ", "題", "状態", "更新"],
         [[tlink(t["id"]), e(t["project"]), e(t["title"]), e(t["status"]), e(t["updated_at"])] for t in tasks])
@@ -240,7 +240,40 @@ def safe_json_list(s):
         return []
 
 
-def page_task(tid):
+RESOLVE_MSG = {"done": "対応済みにしました。", "already": "すでに対応済みでした。",
+               "error": "対応済みにできませんでした(tb の実行に失敗)。"}
+
+
+def resolvable(c):
+    return c.get("kind") in ("question", "blocked") and "resolved_at" in c and not c.get("resolved_at")
+
+
+def resolve_form(c, back, ctx):
+    """「対応済みにする」。ログイン済みのブラウザからの POST だけを受ける(書き込みは tb resolve が行う)。"""
+    ctx["norefresh"] = True  # 入力欄があるので自動更新しない
+    return (f'<form method=post action="/resolve"><input type=hidden name=csrf value="{e(ctx.get("csrf", ""))}">'
+            f'<input type=hidden name=id value="{int(c["id"])}"><input type=hidden name=back value="{e(back)}">'
+            f'<input type=text name=note maxlength={NOTE_MAX} placeholder="メモ(任意)" size=18> '
+            '<button type=submit>対応済みにする</button></form>')
+
+
+def resolved_label(c):
+    if not c.get("resolved_at"):
+        return ""
+    return "対応済み " + e(c["resolved_at"]) + (f'<br>{e(c["resolved_note"])}' if c.get("resolved_note") else "")
+
+
+def resolve_cell(c, back, ctx):
+    return resolve_form(c, back, ctx) if resolvable(c) else resolved_label(c)
+
+
+def resolve_notice(qs):
+    st = (qs.get("resolved") or [""])[0]
+    return f"<p class=note>{e(RESOLVE_MSG[st])}</p>" if st in RESOLVE_MSG else ""
+
+
+def page_task(tid, qs=None, ctx=None):
+    ctx = {} if ctx is None else ctx
     rows = q("SELECT * FROM tasks WHERE id=?", (tid,))
     if not rows:
         return None
@@ -249,15 +282,14 @@ def page_task(tid):
                                         "parent_id", "summary", "note", "reported_at", "created_at", "updated_at"]]
     dl = safe_json_list(t["deliverables"])
     info.append(("成果物", "<br>".join(e(x) for x in dl) or "-"))
-    if t.get("session_id"):
-        info.append(("resume コマンド", f'<code>{e("claude --resume " + shlex.quote(t["session_id"]))}</code>'))
-    body = "<table>" + "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in info) + "</table>"
+    body = resolve_notice(qs or {}) + "<table>" + "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in info) + "</table>"
     cm = q("SELECT * FROM comments WHERE task_id=? ORDER BY id DESC", (tid,))
+    back = "/tasks/" + quote(str(tid), safe="")
     body += "<h2>報告</h2>" + table(
-        ["id", "種別", "本文", "成果物", "from", "配送", "時刻"],
+        ["id", "種別", "本文", "成果物", "from", "配送", "時刻", "対応"],
         [[f"C-{c['id']}", e(c["kind"]), f'<pre>{e(c["text"])}</pre>',
           "<br>".join(e(x) for x in safe_json_list(c["deliverables"])), e(c["from_name"]),
-          "済" if c["delivered_at"] else "未", e(c["created_at"])] for c in cm])
+          "済" if c["delivered_at"] else "未", e(c["created_at"]), resolve_cell(c, back, ctx)] for c in cm])
     px = q("SELECT * FROM proxy_requests WHERE task_id=? ORDER BY id DESC", (tid,))
     body += "<h2>代行依頼</h2>" + table(
         ["id", "状態", "effect", "コマンド", "理由", "結果"],
@@ -266,13 +298,15 @@ def page_task(tid):
     return f"タスク {clean(t['id'])}", body
 
 
-def page_inbox(_qs):
+def page_inbox(qs, ctx=None):
+    ctx = {} if ctx is None else ctx
     comments, proxies, blocked = needs_human()
     ids = {c["id"] for c in comments}
-    body = "<h2>要対応 (needs-human)</h2>"
-    body += table(["id", "種別", "タスク", "本文", "from", "時刻"],
+    body = resolve_notice(qs) + "<h2>要対応 (needs-human)</h2>"
+    body += table(["id", "種別", "タスク", "本文", "from", "時刻", "操作"],
                   [[f"C-{c['id']}", f'<span class=warn>{e(c["kind"])}</span>', tlink(c["task_id"]),
-                    f'<pre>{e(c["text"])}</pre>', e(c["from_name"]), e(c["created_at"])] for c in comments])
+                    f'<pre>{e(c["text"])}</pre>', e(c["from_name"]), e(c["created_at"]),
+                    resolve_cell(c, "/inbox", ctx)] for c in comments])
     body += "<h3>代行依頼 (pending-human)</h3>" + table(
         ["id", "タスク", "effect", "コマンド", "理由"],
         [[e(p["id"]), tlink(p["task_id"]), e(p["effect"]), f'<pre>{e(p["cmd"])}</pre>', e(p["why"])] for p in proxies])
@@ -282,9 +316,9 @@ def page_inbox(_qs):
          for a in blocked])
     rest = [c for c in q("SELECT * FROM comments ORDER BY id DESC LIMIT 60") if c["id"] not in ids][:50]
     body += "<h2>直近の報告</h2>" + table(
-        ["id", "種別", "タスク", "本文", "from", "時刻"],
+        ["id", "種別", "タスク", "本文", "from", "時刻", "状態"],
         [[f"C-{c['id']}", e(c["kind"]), tlink(c["task_id"]), f'<pre>{e(c["text"])}</pre>', e(c["from_name"]),
-          e(c["created_at"])] for c in rest])
+          e(c["created_at"]), resolved_label(c)] for c in rest])
     return "報告・承認待ち", body
 
 
@@ -374,17 +408,20 @@ STATIC = {"/": page_overview, "/notifications": page_notifications, "/agents": p
           "/jobs": page_jobs, "/ledger": page_ledger}
 
 
-def route(path, qs):
-    """(status, title, body) か None(404)。"""
+def route(path, qs, ctx=None):
+    """(title, body) か None(404)。ctx: {"csrf": フォーム用トークン}。フォームを出したページは ctx["norefresh"] を立てる。"""
+    ctx = {} if ctx is None else ctx
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/")
+    if path == "/inbox":
+        return page_inbox(qs, ctx)
     if path in STATIC:
         t, b = STATIC[path](qs)
         return t, b
     m = re.fullmatch(r"/(agents|tasks)/([^/]+)", path)
     if m:
         key = unquote(m.group(2))
-        r = page_agent(key) if m.group(1) == "agents" else page_task(key)
+        r = page_agent(key) if m.group(1) == "agents" else page_task(key, qs, ctx)
         return r
     return None
 

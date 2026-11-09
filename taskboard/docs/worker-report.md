@@ -25,7 +25,7 @@ tb は <TASKBOARD_DIR>/bin/tb。
 - 送る文面は固定: `[from: <名前> / <pane> / <task-id> / <kind>] <本文の先頭 200 字> (詳細: tb comments <task-id>)`
 - 報告者(名前・pane・session)は `HERDR_PANE_ID` と `herdr agent list` から引く。**自己申告ではない。** 引けない(pane なし・herdr 失敗・該当 agent なし・名前なし・session なし)ときは保存せず終了コード 3
 - 本文の改行は空白にし、`[from:` と読める並びは `(from:` に置き換える(ラベルの偽装防止)。全文は `tb comments <task-id>` で読む
-- `done` は `--deliverables` と `--text` が必須。`question` / `blocked` は `tb comments` で `needs-human` と表示され、人の判断・承認待ちとして区別できる
+- `done` は `--deliverables` と `--text` が必須。`question` / `blocked` は `tb comments` で `needs-human` と表示され、人の判断・承認待ちとして区別できる。対応済みにするのは人だけ(`tb resolve C-<n>`。worker からは実行できない)
 - 宛先が working / blocked のときは送らず、未配送のまま残る。`tb pending` に `C-<n>` として出るので、`tb pending --ids | xargs -n1 tb report` で再送できる
 - `tb comment --kind done` はタスクの状態を変えない。タスクを完了にするのは `tb done`(+ `tb report`)
 

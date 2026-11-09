@@ -80,3 +80,16 @@ eq "comment: project-specific target" "$(lastp | cut -f1)" "prompt cm-conductor"
 # 一覧
 eq "comments: --kind filter" "$($TB comments $ct --kind question --json | jq -r .kind | sort -u)" "question"
 eq "comments: all tasks" "$($TB comments --json | wc -l | tr -d ' ')" "$(nrows)"
+
+# --- resolve(人が question/blocked を対応済みにする)
+qid=$(HERDR_PANE_ID= $TB comments $ct --kind question --json | jq -r .id | tail -1)
+pid=$(HERDR_PANE_ID= $TB comments $ct --kind progress --json | jq -r .id | tail -1)
+nopen=$($TB comments --open --json | wc -l | tr -d ' ')
+eq "resolve: refused from an agent pane" "$(rc $TB resolve "$qid") $($TB comments --open --json | wc -l | tr -d ' ')" "1 $nopen"
+eq "resolve: human resolves with a note" "$(HERDR_PANE_ID= $TB resolve "$qid" -m '決めた')" "$qid resolved"
+eq "resolve: leaves the open list" "$($TB comments --open --json | jq -r .id | grep -c "^$qid\$")" "0"
+eq "resolve: note and time stored" "$($TB comments --json | jq -r --arg i "$qid" 'select(.id==$i) | (.resolved_note + " " + (.resolved_at != null | tostring))')" "決めた true"
+eq "resolve: tsv shows resolved" "$($TB comments | grep "^$qid	" | cut -f3)" "resolved"
+eq "resolve: twice is ok" "$(HERDR_PANE_ID= $TB resolve "$qid" | grep -c 'すでに対応済み')" "1"
+eq "resolve: progress cannot be resolved" "$(HERDR_PANE_ID= rc $TB resolve "$pid")" "1"
+eq "resolve: unknown id → 1, bad id → 2" "$(HERDR_PANE_ID= rc $TB resolve C-99999) $(HERDR_PANE_ID= rc $TB resolve X-1)" "1 2"

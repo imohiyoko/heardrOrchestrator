@@ -15,6 +15,7 @@ import auth
 
 from .config import COOKIE, HOST, JOB_RE, RUN_DIR, cfg
 from .sanitize import clean, e
+from .actions import resolve_comment
 from .data import NOTIFY_POLL_SEC, badge_count, urgent_items
 from .jobs import job_names, save_job_settings
 from .views import CSS, NOTIFY_JS, err_html, page, page_job, route
@@ -199,16 +200,17 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(404, page("見つかりません", "<p>そのページはありません。</p>", "", badge_count(), logout))
                 title, body = page_job(name, a.form_token("s:" + sh), saved=qs.get("saved") == ["1"])
                 return self._send(200, page(title, body, "/jobs/" + name, badge_count(), logout, refresh=False))
-            r = route(unquote(path), qs)
+            ctx = {"csrf": a.form_token("s:" + sh)}
+            r = route(unquote(path), qs, ctx)
             if r is None:
                 return self._send(404, page("見つかりません", "<p>そのページはありません。</p>", "", badge_count(), logout))
             title, body = r
-            self._send(200, page(title, body, path, badge_count(), logout))
+            self._send(200, page(title, body, path, badge_count(), logout, refresh=not ctx.get("norefresh")))
         except Exception as ex:  # 1 ページの失敗でサーバーを落とさない(例外の内容は出さない)
             sys.stderr.write(f"internal error: {type(ex).__name__}\n")
             self._text(500, "Internal Server Error")
 
-    # ---- POST(/login /setup /logout /reset と、定期実行の設定 /jobs/<job> だけ)
+    # ---- POST(/login /setup /logout /reset と、定期実行の設定 /jobs/<job>、報告の対応済み /resolve だけ)
     def _post(self, path):
         a = self.auth
         if not self._origin_ok():
@@ -218,9 +220,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._text(413, "Payload Too Large")
         sh = self._session()
         job = path.startswith("/jobs/")
-        if job and not sh:
+        if (job or path == "/resolve") and not sh:
             return self._redirect("/login")
-        ctx = "s:" + sh if (path == "/logout" or job) and sh else "anon"
+        ctx = "s:" + sh if (path in ("/logout", "/resolve") or job) and sh else "anon"
         if not a.check_form_token(form.get("csrf"), ctx):
             if path == "/logout" and not sh:
                 return self._redirect("/login")
@@ -238,6 +240,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, page(title, body, path, badge_count(), refresh=False))
             sys.stderr.write(f"jobs: settings {'reset' if form.get('action') == 'reset' else 'saved'} {name}\n")
             return self._redirect(f"/jobs/{name}?saved=1")
+        if path == "/resolve":  # 報告を対応済みにする(書き込みは tb resolve)
+            cid, back = form.get("id", ""), form.get("back", "/inbox")
+            if not re.fullmatch(r"[0-9]{1,9}", cid):
+                return self._text(400, "Bad Request")
+            if not re.fullmatch(r"/inbox|/tasks/[A-Za-z0-9_%-]{1,200}", back):
+                back = "/inbox"
+            st = resolve_comment(int(cid), form.get("note", ""))
+            sys.stderr.write(f"resolve: C-{cid} {st}\n")
+            return self._redirect(back + "?" + urlencode({"resolved": st}))
         if path == "/logout":
             a.destroy_session(self._session_token())
             return self._redirect("/login", [self._cookie("", 0)])
@@ -316,11 +327,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return self._text(403, "Forbidden")
         path = urlsplit(self.path).path
-        if self.command == "POST" and (path in ("/login", "/setup", "/logout", "/reset")
+        if self.command == "POST" and (path in ("/login", "/setup", "/logout", "/reset", "/resolve")
                                        or re.fullmatch(r"/jobs/[A-Za-z0-9][A-Za-z0-9_-]{0,63}", path)):
             return self._post(path)
         if self.command not in ("GET", "HEAD"):
-            return self._text(405, "Method Not Allowed(定期実行の設定以外は読み取り専用です)", [("Allow", "GET, HEAD")])
+            return self._text(405, "Method Not Allowed(定期実行の設定と報告の対応済み以外は読み取り専用です)", [("Allow", "GET, HEAD")])
         self._get()
 
     do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _handle
