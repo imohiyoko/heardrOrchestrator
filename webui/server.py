@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """herdr Web UI 第 1 段(読み取り専用)。標準ライブラリだけ。127.0.0.1 限定、トークン必須。
 
-サーバー側で HTML を組み立てる複数ページ構成(SPA ではない)。書き込み系は持たない。
+サーバー側で HTML を組み立てる複数ページ構成(SPA ではない)。tasks.db は読むだけで、
+書き込むのはログイン情報(run/)とスケジュールの上書き設定(scheduler/settings/)だけ。
 設定は環境変数(README 参照)。
 """
 import html
@@ -23,6 +24,8 @@ import auth
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HERDR_ROOT = os.path.dirname(ROOT)
+sys.path.insert(0, os.path.join(HERDR_ROOT, "lib"))
+import herdr_env  # noqa: E402  部品で共通の既定値(lib/herdr-env.sh と同じ)
 
 HOST = "127.0.0.1"
 COOKIE = "herdr_webui_session"
@@ -35,8 +38,8 @@ def cfg(name, default):
     return os.environ.get(name) or default
 
 
-HERDR_BIN = lambda: cfg("HERDR_BIN", "herdr")  # noqa: E731
-TB_DB = lambda: cfg("WEBUI_TB_DB", os.path.join(HERDR_ROOT, "taskboard", "data", "tasks.db"))  # noqa: E731
+HERDR_BIN = herdr_env.herdr_bin
+TB_DB = lambda: cfg("WEBUI_TB_DB", herdr_env.tb_db())  # noqa: E731  WEBUI_TB_DB → TB_DB → 既定
 SCHED_LOGS = lambda: cfg("WEBUI_SCHED_LOGS", os.path.join(HERDR_ROOT, "scheduler", "logs"))  # noqa: E731
 DISPATCH = lambda: cfg("WEBUI_DISPATCH", os.path.join(HERDR_ROOT, "conductor", "dispatch.jsonl"))  # noqa: E731
 RUN_DIR = lambda: cfg("WEBUI_RUN_DIR", os.path.join(ROOT, "run"))  # noqa: E731
