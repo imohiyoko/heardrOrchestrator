@@ -1,0 +1,9 @@
+# tb send の宛先ルール(config/routes.conf にコピーして使う)。1 行 1 ルール:
+#   <送信者のパターン> -> <宛先のパターン>        許可
+#   ! <送信者のパターン> -> <宛先のパターン>      拒否
+# パターンは agent 名の glob(* と ?)。上から順に見て、最初に一致した行で決まる。どれにも一致しなければ拒否。
+# routes.conf が無いときは「指揮官(conductor と projects.conf の値)→ 誰にでも」だけを許可する。
+# worker → 指揮官の報告は tb send ではなく tb comment を使う。
+!conductor -> setup*
+conductor -> *
+project-a-conductor -> project-a-*
