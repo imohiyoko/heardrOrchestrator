@@ -145,9 +145,22 @@ tb outbox [--status queued|sent|denied] [--json]
 - 終了コード: 0 送信済み / 10 宛先使用中で積んだ / 11 送信失敗で積んだ / 4 ルールで拒否 / 3 送信者を特定できず未保存
 - agent に `herdr agent prompt` を直接打たせないようにするには、その agent の Claude Code 設定で拒否する(`conductor/README.md`)
 
+## 役割の配布(roles)
+
+`roles/` の役割ファイルを各 agent に渡す(詳細は `roles/README.md`)。
+
+```bash
+tb role-context --source startup|resume|clear|compact --session-id S   # SessionStart hook 用(bin/tb-role-hook 経由)
+tb role-broadcast [agent 名 ...]   # 動いている agent に「役割が更新された・このファイルを読め」と送る
+tb roles [--json]                  # agent ごとの役割ファイル・版・状態(current|outdated|never|no-role)
+```
+
+- 同じセッションに同じ版(`_common.md` + 役割ファイルの SHA-256)を渡し済みなら、`resume` と `role-broadcast` では送らない。compact の後は渡し直す
+- 一括送信は `[role-update / tb] ...` で始まる 1 行(ファイルの絶対パス)。宛先が使用中なら送らず、終了コード 10
+
 ## 送信の記録
 
-tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわらず `messages` に残る(`kind`=report|comment|digest|send、
+tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわらず `messages` に残る(`kind`=report|comment|digest|send|role、
 `result`=sent|busy|failed、本文)。agent が台帳を書き忘れても、アプリ側の記録は欠けない。
 
 ## 宛先の設定
@@ -164,14 +177,14 @@ tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわ�
 `effect` は `read-only|write|external`、`status` は `open|done|pending-human|denied`。
 `comments(id, task_id, kind, text, deliverables, from_name, from_pane, from_session, delivered_at, created_at)`
 `agent_activity(session_id PK, pane_id, tab_id, workspace_id, cwd, last_prompt_id, last_prompt_at, last_stop_at, updated_at)`
-`messages(id, kind, ref, target, body, result, created_at)` / `outbox(id, from_name, from_pane, from_session, target, kind, task_id, text, status, reason, sent_at, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)`
+`messages(id, kind, ref, target, body, result, created_at)` / `role_briefings(id, session_id, agent, role_file, hash, source, via, created_at)` / `outbox(id, from_name, from_pane, from_session, target, kind, task_id, text, status, reason, sent_at, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)`
 `tasks.status` は `todo|in_progress|review|done|blocked`。`summary`(done の要約)と `note`(block の理由)は設計メモの最小案への追加。
 時刻は UTC の ISO 8601。
 
 ## 環境変数
 
 `TB_DB`(DB パス) / `TB_CONFIG`(projects.conf) / `HERDR_BIN`(herdr の実体。既定 `herdr`)
-`TB_ROUTES`(routes.conf) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
+`TB_ROUTES`(routes.conf) / `TB_ROLES`(roles/) / `TB_ROLE_MAX`(12000) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
 
 ## テスト
 
