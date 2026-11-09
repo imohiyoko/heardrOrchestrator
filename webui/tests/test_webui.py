@@ -1,5 +1,6 @@
 """境界のテスト。herdr は疑似、DB・ログは一時ディレクトリ。実ポートは高位の小さな範囲だけ使い、必ず片付ける。"""
 import atexit
+import glob
 import http.client
 import json
 import os
@@ -16,6 +17,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.join(os.path.dirname(HERE), "server.py")
+SCHEMA_DIR = os.path.join(os.path.dirname(os.path.dirname(HERE)), "taskboard", "schema")
 TMP = tempfile.mkdtemp(prefix="webui-test-")
 procs, socks = [], []
 fails = []
@@ -144,20 +146,9 @@ open(os.path.join(TMP, "fake", "dialog.txt"), "w").write(
 
 def make_db(path):
     c = sqlite3.connect(path)
-    c.executescript("""
-    CREATE TABLE tasks (id TEXT PRIMARY KEY, project TEXT NOT NULL, title TEXT NOT NULL, owner_agent TEXT,
-      session_id TEXT, account TEXT, status TEXT NOT NULL DEFAULT 'todo', parent_id TEXT,
-      deliverables TEXT NOT NULL DEFAULT '[]', summary TEXT, note TEXT, reported_at TEXT,
-      created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, kind TEXT NOT NULL,
-      text TEXT NOT NULL, deliverables TEXT NOT NULL DEFAULT '[]', from_name TEXT NOT NULL, from_pane TEXT NOT NULL,
-      from_session TEXT NOT NULL, delivered_at TEXT, created_at TEXT NOT NULL);
-    CREATE TABLE proxy_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, cmd TEXT NOT NULL,
-      why TEXT NOT NULL, effect TEXT NOT NULL, expect TEXT, status TEXT NOT NULL DEFAULT 'open', result TEXT,
-      created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE agent_activity (session_id TEXT PRIMARY KEY, pane_id TEXT, tab_id TEXT, workspace_id TEXT, cwd TEXT,
-      last_prompt_id TEXT, last_prompt_at TEXT, last_stop_at TEXT, updated_at TEXT NOT NULL);
-    """)
+    # 本物のスキーマ(taskboard/schema/*.sql を tb と同じ順に流す)。手書きのスキーマは持たない
+    for f in sorted(glob.glob(os.path.join(SCHEMA_DIR, "[0-9][0-9][0-9]_*.sql"))):
+        c.executescript(open(f, encoding="utf-8").read())
     c.execute("INSERT INTO tasks VALUES ('T-1','pj','題 " + XSS + "','alpha','11111111-2222-3333-4444-555555555555',"
               "NULL,'in_progress',NULL,'[\"a.md\"]',NULL,NULL,NULL,'2026-11-06T00:00:00Z','2026-11-06T00:00:00Z')")
     c.execute("INSERT INTO comments (task_id,kind,text,from_name,from_pane,from_session,created_at) VALUES "
@@ -289,9 +280,9 @@ open(os.path.join(env["WEBUI_SCHED_LOGS"], "job2.log"), "w").write(
     json.dumps({"ts": "2026-11-06T11:30:00+0900", "job": "job2", "action": "skipped", "reason": "window"}) + "\n")
 _c = sqlite3.connect(env["WEBUI_TB_DB"])
 _c.execute("INSERT INTO proxy_requests (task_id,cmd,why,effect,status,created_at,updated_at) VALUES "
-           "('T-1','git push " + XSS + "','push したい','remote','pending-human','2026-11-06T00:00:00Z','2026-11-06T00:00:00Z')")
+           "('T-1','git push " + XSS + "','push したい','external','pending-human','2026-11-06T00:00:00Z','2026-11-06T00:00:00Z')")
 _c.execute("INSERT INTO proxy_requests (task_id,cmd,why,effect,status,created_at,updated_at) VALUES "
-           "('T-1','ls','見る','none','done','2026-11-06T00:00:00Z','2026-11-06T00:00:00Z')")
+           "('T-1','ls','見る','read-only','done','2026-11-06T00:00:00Z','2026-11-06T00:00:00Z')")
 _c.commit()
 _c.close()
 # 旧方式の run/token が残っていても無視される
@@ -444,10 +435,8 @@ check("無効な Cookie の /api/notifications も 401", Client(port).get("/api/
 check("POST /api/notifications は 405", cl.raw("POST", "/api/notifications", {"a": "b"})[0] == 405)
 # 送信の承認待ち(tb send が approvals.conf で ask になったもの)
 _c = sqlite3.connect(env["WEBUI_TB_DB"])
-_c.executescript("CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, from_name TEXT, from_pane TEXT, from_session TEXT, target TEXT,"
-                 " kind TEXT, task_id TEXT, text TEXT, status TEXT, reason TEXT, sent_at TEXT, created_at TEXT);"
-                 "INSERT INTO outbox (from_name,target,kind,text,status,created_at) VALUES ('conductor','w1','task','調べて <b>x</b>','pending','t');"
-                 "INSERT INTO outbox (from_name,target,kind,text,status,created_at) VALUES ('conductor','w1','task','済','sent','t');")
+_c.executescript("INSERT INTO outbox (from_name,from_pane,from_session,target,kind,text,status,created_at) VALUES ('conductor','w0:p1','s','w1','task','調べて <b>x</b>','pending','t');"
+                 "INSERT INTO outbox (from_name,from_pane,from_session,target,kind,text,status,created_at) VALUES ('conductor','w0:p1','s','w1','task','済','sent','t');")
 _c.commit(); _c.close()
 time.sleep(3.2)  # 通知のキャッシュ切れを待つ
 r = cl.get("/api/notifications")
@@ -455,13 +444,10 @@ _it = [it for it in json.loads(r[2])["items"] if it["id"].startswith("o:")] if r
 check("送信の承認待ちが通知に出る(承認コマンド付き)", [it["id"] for it in _it] == ["o:1"] and "tb approve O-1" in _it[0]["body"], str(_it))
 check("送信の承認待ちは /notifications でエスケープ", "&lt;b&gt;x&lt;/b&gt;" in cl.get("/notifications")[2])
 _c = sqlite3.connect(env["WEBUI_TB_DB"])
-_c.executescript("CREATE TABLE alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT, severity TEXT, title TEXT, body TEXT, source TEXT,"
-                 " source_pane TEXT, status TEXT, count INTEGER, analyst TEXT, note TEXT, result_summary TEXT, result_report TEXT, result_path TEXT,"
-                 " result_by TEXT, result_delivered_at TEXT, first_seen TEXT, last_seen TEXT, analysis_started_at TEXT, analyzed_at TEXT, closed_at TEXT);"
-                 "INSERT INTO alerts (severity,title,status,result_summary,analyzed_at) VALUES ('critical','API <i>5xx</i>','analyzed','設定漏れ','t1');"
-                 "INSERT INTO alerts (severity,title,status,result_summary,analyzed_at) VALUES ('low','軽微','analyzed','誤報','t2');"
-                 "INSERT INTO alerts (title,status,body,last_seen) VALUES ('ディスク','awaiting-approval','80%','t3');"
-                 "INSERT INTO alerts (title,status) VALUES ('解析中','analyzing');")
+_c.executescript("INSERT INTO alerts (fingerprint,source,first_seen,last_seen,severity,title,status,result_summary,analyzed_at) VALUES ('f1','watch','t0','t0','critical','API <i>5xx</i>','analyzed','設定漏れ','t1');"
+                 "INSERT INTO alerts (fingerprint,source,first_seen,last_seen,severity,title,status,result_summary,analyzed_at) VALUES ('f2','watch','t0','t0','low','軽微','analyzed','誤報','t2');"
+                 "INSERT INTO alerts (fingerprint,source,first_seen,title,status,body,last_seen) VALUES ('f3','watch','t0','ディスク','awaiting-approval','80%','t3');"
+                 "INSERT INTO alerts (fingerprint,source,first_seen,last_seen,title,status) VALUES ('f4','watch','t0','t0','解析中','analyzing');")
 _c.commit(); _c.close()
 time.sleep(3.2)
 _ids = [it["id"] for it in json.loads(cl.get("/api/notifications")[2])["items"] if it["id"][:2] in ("r:", "w:")]
