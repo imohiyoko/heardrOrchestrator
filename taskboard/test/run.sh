@@ -513,7 +513,7 @@ sqlite3 "$TB_DB" "PRAGMA user_version=999;"
 eq "schema: guard stops a migration that already ran" "$([[ $r -ne 0 ]] && echo stopped) $(sqlite3 "$TB_DB" "SELECT COUNT(*) FROM tasks WHERE id='T-dup-001';")" "stopped 0"
 eq "schema: already migrated → tb still works" "$(TB_SCHEMA_DIR=$TMP/badschema rc $TB list)" "0"
 mkdir -p "$TMP/noschema"
-eq "schema: no schema files → exit 1" "$(TB_DB=$TMP/none.db TB_SCHEMA_DIR=$TMP/noschema rc $TB list)" "1"
+eq "schema: no schema files → exit 1, no DB file" "$(TB_DB=$TMP/none/x.db TB_SCHEMA_DIR=$TMP/noschema rc $TB list) $([[ -e $TMP/none ]] && echo created || echo absent)" "1 absent"
 export TB_DB=$TMP/old.db
 
 # --- alerts(アラート → 解析役)

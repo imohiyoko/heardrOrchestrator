@@ -19,11 +19,12 @@ migration_sql() {  # $1=番号 $2=ファイル
 
 # 最新なら PRAGMA 1 回で戻る(hook から毎回呼ばれるので軽くしておく)
 init_db() {
-  mkdir -p "$(dirname "$DB")"
   local v latest f n err
-  v=$(sql "PRAGMA user_version;") || return 1
+  # スキーマが無ければ DB に触る前に止める(sqlite3 は開いただけで空の DB ファイルを作る)
   latest=$(schema_latest)
   ((latest > 0)) || { echo "tb: スキーマのファイルが見つかりません: ${TB_SCHEMA_DIR:-$HERDR_SCHEMA_DIR}" >&2; return 1; }
+  mkdir -p "$(dirname "$DB")"
+  v=$(sql "PRAGMA user_version;") || return 1
   ((v >= latest)) && return 0
   while IFS= read -r f; do
     n=$((10#$(basename "$f" | cut -c1-3)))
