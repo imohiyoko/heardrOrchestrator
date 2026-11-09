@@ -113,5 +113,11 @@ case "$STATE" in
 esac
 if [ "$DRY_RUN" = 1 ]; then emit sent "dry-run: would send to $TARGET"; exit 0; fi
 
-out=$("$HERDR" agent prompt "$PANE" "$TEXT" 2>&1) || fail "herdr agent prompt 失敗: ${out:0:300}"
-emit sent "prompt submitted"
+# 送信は tb を通す(送ったものは taskboard の messages に kind=scheduler で残る)
+TB="${TB_BIN:-$SCHED_ROOT/../taskboard/bin/tb}"
+out=$(env -u HERDR_PANE_ID HERDR_BIN="$HERDR" bash "$TB" system-send "$TARGET" --text "$TEXT" --job "$JOB" 2>&1); rc=$?
+case $rc in
+  0) emit sent "prompt submitted (via tb)" ;;
+  10) emit skipped_state "target became busy before sending (tb)" ;;
+  *) fail "tb system-send 失敗(exit $rc): ${out:0:300}" ;;
+esac

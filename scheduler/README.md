@@ -1,8 +1,8 @@
 # scheduler
 
 定期実行を agent の cron ではなく macOS の launchd で担保する。agent は呼ばれた回に実行するだけ。
-launchd が `bin/tick.sh <job>` を指定時刻に起動し、時間帯・曜日・agent の状態を判定して、
-`herdr agent prompt` で本文を送る。
+launchd が `bin/tick.sh <job>` を毎分起動し、時間帯・曜日・間隔・agent の状態を判定して、
+`taskboard/bin/tb system-send` で本文を送る(送ったものは taskboard の `messages` に `kind=scheduler` で残る。`TB_BIN` で tb の場所を変えられる)。
 
 ## ジョブの足し方
 

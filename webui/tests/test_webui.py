@@ -454,6 +454,19 @@ r = cl.get("/api/notifications")
 _it = [it for it in json.loads(r[2])["items"] if it["id"].startswith("o:")] if r[0] == 200 else []
 check("送信の承認待ちが通知に出る(承認コマンド付き)", [it["id"] for it in _it] == ["o:1"] and "tb approve O-1" in _it[0]["body"], str(_it))
 check("送信の承認待ちは /notifications でエスケープ", "&lt;b&gt;x&lt;/b&gt;" in cl.get("/notifications")[2])
+_c = sqlite3.connect(env["WEBUI_TB_DB"])
+_c.executescript("CREATE TABLE alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT, severity TEXT, title TEXT, body TEXT, source TEXT,"
+                 " source_pane TEXT, status TEXT, count INTEGER, analyst TEXT, note TEXT, result_summary TEXT, result_report TEXT, result_path TEXT,"
+                 " result_by TEXT, result_delivered_at TEXT, first_seen TEXT, last_seen TEXT, analysis_started_at TEXT, analyzed_at TEXT, closed_at TEXT);"
+                 "INSERT INTO alerts (severity,title,status,result_summary,analyzed_at) VALUES ('critical','API <i>5xx</i>','analyzed','設定漏れ','t1');"
+                 "INSERT INTO alerts (severity,title,status,result_summary,analyzed_at) VALUES ('low','軽微','analyzed','誤報','t2');"
+                 "INSERT INTO alerts (title,status,body,last_seen) VALUES ('ディスク','awaiting-approval','80%','t3');"
+                 "INSERT INTO alerts (title,status) VALUES ('解析中','analyzing');")
+_c.commit(); _c.close()
+time.sleep(3.2)
+_ids = [it["id"] for it in json.loads(cl.get("/api/notifications")[2])["items"] if it["id"][:2] in ("r:", "w:")]
+check("アラート: critical/high の解析結果と起動待ちだけ通知", _ids == ["r:1:t1", "w:3"], str(_ids))
+check("アラート: 題名はエスケープ", "API &lt;i&gt;5xx&lt;/i&gt;" in cl.get("/notifications")[2])
 r = cl.get("/notify.js")
 check("/notify.js が 200 の JavaScript", r[0] == 200 and r[1].get("Content-Type", "").startswith("text/javascript")
       and "Notification" in r[2] and "/api/notifications" in r[2], str(r[:2]))

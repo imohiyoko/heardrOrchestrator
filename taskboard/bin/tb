@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tb — herdr agent 用の最小タスク表(SQLite 1 ファイル)
-# usage: tb {add|list|show|claim|update|done|block|report|pending|proxy-*|touch|activity|comment|comments|digest|digests|send|flush|outbox|role-*|roles|approval|allow|ask|approve|reject} ...  (tb help で詳細)
+# usage: tb {add|list|show|claim|update|done|block|report|pending|proxy-*|touch|activity|comment|comments|digest|digests|send|flush|outbox|role-*|roles|approval|allow|ask|approve|reject|alert*|system-send} ...  (tb help で詳細)
 #
 # 環境変数: TB_DB(DB パス) / TB_CONFIG(projects.conf) / HERDR_BIN(herdr の実体。テストでは疑似 herdr)
 # 終了コード: 0 成功 / 1 エラー / 2 使い方の誤り
@@ -102,7 +102,7 @@ init_db() {
   );
   CREATE TABLE IF NOT EXISTS messages (       -- tb が送ろうとしたものすべて(送れたか否かも)
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind       TEXT NOT NULL,                  -- report|comment|digest|send|role
+    kind       TEXT NOT NULL,                  -- report|comment|digest|send|role|alert|scheduler
     ref        TEXT,                           -- T-.. / C-.. / D-..
     target     TEXT NOT NULL,
     body       TEXT NOT NULL,
@@ -128,6 +128,22 @@ init_db() {
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS role_briefings_session ON role_briefings(session_id);
+  CREATE TABLE IF NOT EXISTS alerts (         -- 見張り役が登録した異常と、その解析
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint   TEXT NOT NULL,                -- --key(無ければ題名)の SHA-256 先頭。未解決の同じ指紋はまとめる
+    severity      TEXT CHECK (severity IS NULL OR severity IN ('critical','high','medium','low')),   -- 解析役が決める
+    title         TEXT NOT NULL,
+    body          TEXT,
+    source        TEXT NOT NULL,                -- 報告した agent 名(herdr から)か cli
+    source_pane   TEXT,
+    status        TEXT NOT NULL CHECK (status IN ('new','awaiting-approval','approved','queued','analyzing','analyzed','closed')),
+    count         INTEGER NOT NULL DEFAULT 1,
+    analyst       TEXT,
+    note          TEXT,
+    result_summary TEXT, result_report TEXT, result_path TEXT, result_by TEXT, result_delivered_at TEXT,
+    first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, analysis_started_at TEXT, analyzed_at TEXT, closed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS alerts_status ON alerts(status);
   CREATE TABLE IF NOT EXISTS digests (        -- まとめ送信 1 通ごと。body は複数行の全文
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     target     TEXT NOT NULL,
@@ -774,6 +790,17 @@ collect_digest() {
     summary=$(jq -r '.summary // ""' <<<"$r"); dels=$(jq -r '.deliverables | fromjson | join(", ")' <<<"$r")
     add_item "$(target_for "$project")" task "$id" "" "$id" "" "$id done / $owner" "$summary / 成果物: $dels"
   done < <(sql -json "SELECT * FROM tasks WHERE status='done' AND (reported_at IS NULL OR reported_at='') ORDER BY updated_at, id;" | jq -c '(. // [])[]')
+  # 2b. アラート: 新しく登録されたもの(まだまとめに入れていない)と、届いていない解析結果
+  while IFS=$'\t' read -r id st title; do
+    [[ -n $id ]] || continue
+    key="alert:$id"; obs_seen "$key" && continue
+    add_item "$DEFAULT_TARGET" obs "A-$id" "$key" "" alert "A-$id アラート / $st" "$title (tb alerts A-$id)"
+  done < <(sql -separator $'\t' "SELECT id, status, replace(replace(title, char(10), ' '), char(9), ' ') FROM alerts WHERE status NOT IN ('closed') ORDER BY id;")
+  while IFS=$'\t' read -r id sev title summary; do
+    [[ -n $id ]] || continue
+    add_item "$DEFAULT_TARGET" alert "A-$id" "" "" "" "A-$id 解析結果 / $sev" "$title — $summary (全文: tb alerts A-$id)"
+  done < <(sql -separator $'\t' "SELECT id, severity, replace(replace(title, char(10), ' '), char(9), ' '), replace(replace(result_summary, char(10), ' '), char(9), ' ')
+             FROM alerts WHERE status='analyzed' AND result_delivered_at IS NULL ORDER BY id;")
   # 3. 観測: turn が終わって DIGEST_IDLE_MIN 分たつのに in_progress のまま(done も報告もない)
   while IFS=$'\t' read -r id project owner key m; do
     [[ -n $id ]] || continue
@@ -846,6 +873,7 @@ cmd_digest() {
   done
   [[ $DIGEST_IDLE_MIN =~ ^[0-9]+$ && $DIGEST_STUCK_MIN =~ ^[0-9]+$ ]] || usage "TB_DIGEST_IDLE_MIN / TB_DIGEST_STUCK_MIN は数字"
   ((dry)) || cmd_flush >/dev/null 2>&1 || true   # 積まれた下りの送信も届ける(結果は outbox / messages に残る)
+  ((dry)) || cmd_alert-dispatch >/dev/null 2>&1 || true   # 承認・上限待ちのアラートを進める
   DIGEST_ITEMS=""
   collect_digest
   [[ -n $DIGEST_ITEMS ]] || { echo "digest: 送るものはありません"; return 0; }
@@ -867,6 +895,7 @@ cmd_digest() {
         case $type in
           comment) sql "UPDATE comments SET delivered_at=$(q "$ts") WHERE id=${ref#C-} AND delivered_at IS NULL;";;
           task)    sql "UPDATE tasks SET reported_at=$(q "$ts"), updated_at=$(q "$ts") WHERE id=$(q "$ref") AND reported_at IS NULL;";;
+          alert)   sql "UPDATE alerts SET result_delivered_at=$(q "$ts") WHERE id=${ref#A-} AND result_delivered_at IS NULL;";;
           obs)     sql "INSERT OR IGNORE INTO observations (key, kind, task_id, text, digest_id, created_at)
                         VALUES ($(q "$(jq -r .key <<<"$r")"), $(q "$(jq -r .okind <<<"$r")"), $(q "$ref"), $(q "$(jq -r .full <<<"$r")"), $did, $(q "$ts"));";;
         esac
@@ -1244,6 +1273,186 @@ cmd_reject() {
   echo "O-$oid rejected"
 }
 
+# ---------- alerts(見張り役が見つけた異常 → 解析役の agent を起動 → 結果を公開) ----------
+ALERT_SEVERITIES="critical high medium low"
+ANALYST_MAX=${TB_ANALYST_MAX:-2}
+ANALYST_CWD=${TB_ANALYST_CWD:-$TB_ROOT/..}
+ANALYST_MODEL=${TB_ANALYST_MODEL:-}
+valid_aid() { [[ $1 =~ ^A-[0-9]+$ ]] || usage "アラート ID は A-<数字>: $1"; }
+alert_row() { sql -json "SELECT * FROM alerts WHERE id=${1#A-};" | jq -c '.[0] // empty'; }
+
+# tb alert: 登録。見張り役は「何が起きたか」だけを書く(緊急度は解析役が決める)。
+# 同じ指紋(--key、無ければ題名)の未解決アラートがあれば件数を増やすだけ
+# 出力: "A-<n> new|duplicate <status>"。新規なら続けて解析役の起動を試みる(approvals の alert:analyze)
+cmd_alert() {
+  local title="" body="" bfile="" key="" json=0
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --severity) usage "alert: 緊急度は解析役が tb alert-result --severity で決めます(見張り役は指定しない)";;
+      --title) need_arg "$@"; title=$2; shift 2;;
+      --body) need_arg "$@"; body=$2; shift 2;;
+      --body-file) need_arg "$@"; bfile=$2; shift 2;;
+      --key) need_arg "$@"; key=$2; shift 2;;
+      --json) json=1; shift;;
+      --from|--source|--name|--pane) usage "alert: 報告者は herdr から自動で決まります。$1 は指定できません";;
+      *) usage "alert: 不明な引数 $1";;
+    esac
+  done
+  blank "$title" && usage "alert: --title が必要です"
+  if [[ -n $bfile ]]; then [[ -f $bfile && -r $bfile ]] || die "alert: --body-file を読めません: $bfile"; body=$(head -c 20000 "$bfile"); fi
+  local src="cli" spane=""
+  if [[ -n ${HERDR_PANE_ID:-} ]]; then resolve_label || return 3; src=$LABEL_NAME; spane=$LABEL_PANE; fi
+  local fp; fp=$(printf '%s' "${key:-$title}" | sha256 | cut -c1-16)
+  local dup; dup=$(sql "SELECT id FROM alerts WHERE fingerprint=$(q "$fp") AND status NOT IN ('analyzed','closed') ORDER BY id DESC LIMIT 1;")
+  local id state ts; ts=$(now)
+  if [[ -n $dup ]]; then
+    sql "UPDATE alerts SET count=count+1, last_seen=$(q "$ts") WHERE id=$dup;"
+    id=$dup; state=duplicate
+  else
+    id=$(sql "INSERT INTO alerts (fingerprint, title, body, source, source_pane, status, count, first_seen, last_seen)
+      VALUES ($(q "$fp"), $(q "$title"), $(q "$body"), $(q "$src"), NULLIF($(q "$spane"),''), 'new', 1, $(q "$ts"), $(q "$ts"));
+      SELECT last_insert_rowid();")
+    state=new
+  fi
+  [[ $state == new ]] && { alert_dispatch_one "$id" >/dev/null 2>&1 || true; }
+  if ((json)); then alert_row "$id" | jq -c '.id = "A-\(.id)"'
+  else echo "A-$id $state $(sql "SELECT status FROM alerts WHERE id=$id;")"; fi
+}
+
+# 解析役を起動する。新規で approvals が ask なら awaiting-approval。上限に達していれば queued(承認は済んだ扱い)
+alert_dispatch_one() {  # $1=alerts.id(数字)
+  local id=$1 st
+  st=$(sql "SELECT status FROM alerts WHERE id=$id;")
+  [[ $st == new || $st == queued || $st == approved ]] || return 0
+  if [[ $st == new ]]; then
+    approval_of "alert:analyze"
+    if [[ $APPROVAL_VALUE != allow ]]; then sql "UPDATE alerts SET status='awaiting-approval' WHERE id=$id;"; return 0; fi
+  fi
+  local busy; busy=$(sql "SELECT COUNT(*) FROM alerts WHERE status='analyzing';")
+  if (( busy >= ANALYST_MAX )); then sql "UPDATE alerts SET status='queued' WHERE id=$id;"; return 0; fi
+  start_analyst "$id"
+}
+
+start_analyst() {  # $1=alerts.id
+  local id=$1 name="analyst-A$1" cwd pane out prompt
+  cwd=$(cd "$ANALYST_CWD" 2>/dev/null && pwd) || { sql "UPDATE alerts SET status='queued', note='TB_ANALYST_CWD が無い' WHERE id=$id;"; return 11; }
+  if ! out=$("$HERDR_BIN" workspace create --cwd "$cwd" --label "$name" --no-focus 2>&1) \
+     || ! pane=$(jq -er '.result.root_pane.pane_id' <<<"$out" 2>/dev/null); then
+    sql "UPDATE alerts SET status='queued', note='workspace を作れない' WHERE id=$id;"; return 11
+  fi
+  local -a extra=(); [[ -n $ANALYST_MODEL ]] && extra=(-- --model "$ANALYST_MODEL")
+  local i ok=0
+  for i in 1 2 3; do   # シェル初期化が遅いと最初の start が失敗する(herdr-up.sh と同じ)
+    if "$HERDR_BIN" agent start "$name" --kind claude --pane "$pane" ${extra[@]+"${extra[@]}"} >/dev/null 2>&1; then ok=1; break; fi
+    sleep "${TB_ANALYST_RETRY_SEC:-3}"
+  done
+  ((ok)) || { sql "UPDATE alerts SET status='queued', note='agent を起動できない' WHERE id=$id;"; return 11; }
+  sql "UPDATE alerts SET status='analyzing', analyst=$(q "$name"), analysis_started_at=$(q "$(now)"), note=NULL WHERE id=$id;"
+  prompt="[from: tb / alert / A-$id / task] あなたはアラート A-$id の解析役です(役割は roles/analyst.md)。まず tb alerts A-$id で全文を読み、原因の仮説・根拠・影響範囲・推奨対応をまとめ、緊急度を決めて、tb alert-result A-$id --severity critical|high|medium|low --summary '<要約>' --report <報告ファイル> で返してください。"
+  # 起動直後は idle になるまで少し待つ(herdr_send は idle/done でしか送らない)
+  for i in 1 2 3 4 5; do herdr_send "$name" "$prompt" "A-$id" alert 2>/dev/null && return 0; sleep "${TB_ANALYST_RETRY_SEC:-3}"; done
+  sql "UPDATE alerts SET note='解析役に依頼を送れていない(tb alert-dispatch で再送)' WHERE id=$id;"
+  return 10
+}
+
+# 承認待ち・上限待ちのアラートを進める(tb digest も最初に呼ぶ)。送れていない依頼も再送する
+cmd_alert-dispatch() {
+  local id
+  while read -r id; do [[ -n $id ]] && { alert_dispatch_one "$id" || true; }; done < <(sql "SELECT id FROM alerts WHERE status IN ('new','queued','approved') ORDER BY id;")
+  sql -separator ' ' "SELECT 'A-'||id, status FROM alerts WHERE status IN ('awaiting-approval','queued','analyzing') ORDER BY id;"
+}
+
+# 人が解析役の起動を承認する(approvals が ask のとき)。--always で alert:analyze を allow に
+cmd_alert-approve() {
+  [[ $# -ge 1 ]] || usage "alert-approve A-<n> [--always]"
+  valid_aid "$1"; local id=${1#A-} always=0; shift
+  [[ ${1:-} == --always ]] && always=1
+  require_human "tb alert-approve"
+  [[ $(sql "SELECT status FROM alerts WHERE id=$id;") == awaiting-approval ]] || die "A-$id は承認待ちではありません"
+  sql "UPDATE alerts SET status='approved' WHERE id=$id;"
+  ((always)) && set_approval allow "alert:analyze" >/dev/null && echo "alert:analyze = allow(今後は承認なし)"
+  alert_dispatch_one "$id" >/dev/null 2>&1 || true
+  echo "A-$id $(sql "SELECT status FROM alerts WHERE id=$id;")"
+}
+
+# 解析役が結果を返す。担当の解析役(または人)だけ
+cmd_alert-result() {
+  [[ $# -ge 1 ]] || usage "alert-result A-<n> --severity critical|high|medium|low --summary S [--report <ファイル>]"
+  valid_aid "$1"; local id=${1#A-} summary="" report="" sev=""; shift
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --summary) need_arg "$@"; summary=$2; shift 2;;
+      --report) need_arg "$@"; report=$2; shift 2;;
+      --severity) need_arg "$@"; sev=$2; shift 2;;
+      *) usage "alert-result: 不明な引数 $1";;
+    esac
+  done
+  [[ " $ALERT_SEVERITIES " == *" $sev "* ]] || usage "alert-result: --severity は $ALERT_SEVERITIES のどれか(緊急度は解析役が決める)"
+  blank "$summary" && usage "alert-result: --summary が必要です"
+  local row; row=$(alert_row "$id"); [[ -n $row ]] || die "アラートが見つかりません: A-$id"
+  local by="human"
+  if [[ -n ${HERDR_PANE_ID:-} ]]; then
+    resolve_label || return 3
+    [[ $LABEL_NAME == "$(jq -r '.analyst // ""' <<<"$row")" ]] || die "A-$id の解析役ではありません($LABEL_NAME)"
+    by=$LABEL_NAME
+  fi
+  [[ $(jq -r .status <<<"$row") != closed ]] || die "A-$id は閉じています"
+  local rtext=""; if [[ -n $report ]]; then [[ -f $report && -r $report ]] || die "--report を読めません: $report"; rtext=$(head -c 50000 "$report"); fi
+  sql "UPDATE alerts SET status='analyzed', severity=$(q "$sev"), result_summary=$(q "$summary"), result_report=NULLIF($(q "$rtext"),''),
+         result_path=NULLIF($(q "$report"),''), result_by=$(q "$by"), analyzed_at=$(q "$(now)") WHERE id=$id;"
+  alert_deliver "$id" >/dev/null 2>&1 || true
+  cmd_alert-dispatch >/dev/null 2>&1 || true   # 枠が空いたので待ちを進める
+  echo "A-$id analyzed"
+}
+
+# 解析結果を指揮官へ(使用中なら tb digest が回収する)
+alert_deliver() {  # $1=id
+  local row msg target
+  row=$(alert_row "$1"); [[ -n $row && $(jq -r '.result_delivered_at // ""' <<<"$row") == "" ]] || return 0
+  target=$DEFAULT_TARGET
+  msg="[alert A-$1 analyzed / $(jq -r .severity <<<"$row")] $(oneline "$(jq -r .title <<<"$row")" 80) — $(oneline "$(jq -r .result_summary <<<"$row")" 300) (全文: tb alerts A-$1)"
+  herdr_send "$target" "$msg" "A-$1" alert || return $?
+  sql "UPDATE alerts SET result_delivered_at=$(q "$(now)") WHERE id=$1;"
+}
+
+cmd_alert-close() {
+  [[ $# -eq 1 ]] || usage "alert-close A-<n>"
+  valid_aid "$1"; require_human "tb alert-close"
+  sql "UPDATE alerts SET status='closed', closed_at=$(q "$(now)") WHERE id=${1#A-};"
+  echo "$1 closed"
+}
+
+cmd_alerts() {
+  local json=0 st=""
+  if [[ ${1:-} == A-* ]]; then
+    valid_aid "$1"; local row; row=$(alert_row "$1"); [[ -n $row ]] || die "アラートが見つかりません: $1"
+    [[ ${2:-} == --json ]] && { jq -c '.id = "A-\(.id)"' <<<"$row"; return 0; }
+    jq -r '"A-\(.id) [\(.severity // "未解析")] \(.status) ×\(.count)  \(.title)\n報告: \(.source) / 初回 \(.first_seen) / 最終 \(.last_seen)\n解析役: \(.analyst // "-")\n\n\(.body // "")\n" +
+      (if .result_summary then "---- 解析結果(\(.result_by), \(.analyzed_at))\n\(.result_summary)\n\n\(.result_report // "")" else "" end)' <<<"$row"
+    return 0
+  fi
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --json) json=1; shift;;
+      --status) need_arg "$@"; st=$2; shift 2;;
+      *) usage "alerts: 不明な引数 $1";;
+    esac
+  done
+  local where="1=1"; [[ -z $st ]] || where="status=$(q "$st")"
+  if ((json)); then sql -json "SELECT * FROM alerts WHERE $where ORDER BY id DESC LIMIT 100;" | jq -c '(. // [])[] | .id = "A-\(.id)"'
+  else sql -nullvalue - -separator $'\t' "SELECT 'A-'||id, COALESCE(severity,'未解析'), status, count, COALESCE(analyst,'-'), last_seen, title FROM alerts WHERE $where ORDER BY id DESC LIMIT 100;"; fi
+}
+
+# scheduler(tick.sh)からのプロンプト送信。agent の pane からは使えない。記録は messages(kind=scheduler)
+cmd_system-send() {
+  [[ $# -ge 3 && $2 == --text ]] || usage "system-send <宛先> --text T --job J"
+  local target=$1 text=$3 job=""; shift 3
+  [[ ${1:-} == --job ]] && job=${2:-}
+  [[ $job =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || usage "system-send: --job が必要です"
+  require_human "tb system-send"
+  herdr_send "$target" "$text" "job:$job" scheduler
+}
+
 cmd_help() {
   cat <<'USAGE'
 tb add -p <project> -t <title> [--parent ID] [--owner N] [--session S] [--account A]   → ID を表示
@@ -1296,6 +1505,16 @@ tb approval <操作>        1 行目 ask|allow、2 行目 rule:。終了コー�
 tb allow <パターン>       今後は承認なしにする(人の端末からだけ)。tb ask <パターン> で承認制に戻す
 tb approve O-<n> [--always]   承認待ちの送信を届ける。--always なら send:<kind>:<宛先> を allow にする
 tb reject O-<n>               承認待ちの送信を却下する
+
+アラート(見張り役 → 解析役の agent を起動 → 結果を指揮官・Web UI へ):
+tb alert --title T [--body B|--body-file F] [--key K] [--json]   見張り役が登録(緊急度は付けない)
+         → "A-<n> new|duplicate <status>"。新規なら approvals の alert:analyze を見て解析役を起動
+tb alerts [A-<n>] [--status S] [--json]    一覧 / 全文と解析結果
+tb alert-approve A-<n> [--always]          人が解析役の起動を承認(--always で今後は承認なし)
+tb alert-result A-<n> --severity critical|high|medium|low --summary S [--report F]   解析役が緊急度と結果を返す(担当の解析役か人だけ)
+tb alert-dispatch                          承認・上限待ちを進める(tb digest も呼ぶ)
+tb alert-close A-<n>                       人が閉じる
+tb system-send <宛先> --text T --job J      scheduler 用。agent の pane からは使えない
 USAGE
 }
 
@@ -1306,7 +1525,7 @@ main() {
     touch) cmd_touch "$@"; return 0;;   # 常に 0。ツールの有無チェックや init_db の失敗でも止めない
     role-context) ( need_tools && init_db ) >/dev/null 2>&1 && cmd_role-context "$@" 2>/dev/null; return 0;;   # hook 用。常に 0
     add|list|show|claim|update|done|block|report|pending|activity) ;;
-    proxy-request|proxy-list|proxy-resolve|proxy-check|comment|comments|digest|digests|send|flush|outbox|role-broadcast|roles|approval|allow|ask|approve|reject) ;;
+    proxy-request|proxy-list|proxy-resolve|proxy-check|comment|comments|digest|digests|send|flush|outbox|role-broadcast|roles|approval|allow|ask|approve|reject|alert|alerts|alert-dispatch|alert-approve|alert-result|alert-close|system-send) ;;
     *) usage "不明なコマンド: $cmd";;
   esac
   need_tools

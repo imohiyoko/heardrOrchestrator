@@ -157,5 +157,14 @@ ok "実行後にロックが残らない" "$([ -e "$LOG_DIR/lock.lock.d" ] && ec
 mkdir "$LOG_DIR/cmd.lock.d"; echo 999999 >"$LOG_DIR/cmd.lock.d/pid"
 NOW="$THU 12:00" bash bin/tick.sh cmd; ok "stale lock は回収して実行" "$(last cmd | jq -r .action)" failed
 
+# ---- プロンプト送信は tb を通る(疑似 herdr と一時 DB。本物は呼ばない)
+export FAKE_LOG="$TMP/herdr.log" TB_DB="$TMP/tb.db"; : >"$FAKE_LOG"
+export FAKE_AGENTS='[{"pane_id":"wD:p1","name":"dummy","agent_status":"idle","agent_session":{"value":"sd"}}]'
+NOW="2026-11-05 09:00" HERDR_BIN="$PWD/../taskboard/test/fake-herdr" bash bin/tick.sh t
+ok "送信: tb 経由で sent" "$(last t | jq -r .action)" sent
+ok "送信: 宛先にプロンプト" "$(grep -c $'^prompt dummy\tdo the thing' "$FAKE_LOG")" 1
+ok "送信: messages に kind=scheduler" "$(sqlite3 "$TB_DB" "SELECT kind||':'||ref||':'||result FROM messages;")" "scheduler:job:t:sent"
+unset FAKE_LOG TB_DB FAKE_AGENTS
+
 echo "---- pass=$pass fail=$failn"
 [ "$failn" = 0 ]

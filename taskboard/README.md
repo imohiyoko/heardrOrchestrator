@@ -164,6 +164,30 @@ tb reject O-<n>
   `Bash(tb allow:*)` なども拒否しておくとより確実)
 - tb が強制するのは `tb send` だけ。ほかの操作(役割の変更・セットアップの書き込みなど)は、agent が `tb approval <操作>` を見て、`ask` なら人に聞く
 
+## アラート(見張り役 → 解析役)
+
+見張り役(`roles/watcher.md`、軽いモデル)が scheduler の定期プロンプトで見回り、異常を見つけたら登録する。tb が解析役の agent を
+1 件ごとに起動し、解析役が緊急度と結果を返す。**緊急度は見張り役ではなく解析役が決める。**
+
+```bash
+tb alert --title '<何が起きたか>' [--body '<見た事実>' | --body-file F] [--key K]   # 見張り役。--severity は指定できない
+tb alerts [A-<n>] [--status S] [--json]
+tb alert-result A-<n> --severity critical|high|medium|low --summary '<要約>' [--report <報告.md>]   # 担当の解析役(か人)だけ
+tb alert-approve A-<n> [--always]   # approvals の alert:analyze が ask のとき、人が起動を承認
+tb alert-dispatch                   # 承認・上限待ちを進める(tb digest も最初に呼ぶ)
+tb alert-close A-<n>                # 人が閉じる
+```
+
+- 同じ指紋(`--key`、無ければ題名)の未解決アラートは 1 件にまとめ、件数(`count`)を増やす。解析済み・閉じたものと同じ題名は新しいアラートになる
+- 解析役は `herdr workspace create --label analyst-A<n>` + `herdr agent start analyst-A<n> --kind claude` で起動し、依頼を送る。
+  起動の可否は `approvals.conf` の `alert:analyze`(既定 allow)。同時に動かす数は `TB_ANALYST_MAX`(既定 2)、超えた分は `queued`。
+  作業ディレクトリは `TB_ANALYST_CWD`(既定このリポジトリ)、モデルは `TB_ANALYST_MODEL`(既定は Claude Code の既定)
+- 結果はすぐ指揮官に送る。使用中なら `tb digest` が回収する。新しいアラートも digest に入る。critical / high の解析結果と起動待ちは Web UI の緊急通知に出る
+- 状態: `new` → (`awaiting-approval` → `approved`)→ (`queued`)→ `analyzing` → `analyzed` → `closed`
+- 解析役の pane / workspace は自動では閉じない(結果を確かめてから人が閉じる)
+
+`tb system-send <宛先> --text T --job J` は scheduler(`tick.sh`)用。agent の pane からは使えない。送ったものは `messages` に `kind=scheduler` で残る。
+
 ## 役割の配布(roles)
 
 `roles/` の役割ファイルを各 agent に渡す(詳細は `roles/README.md`)。
@@ -179,7 +203,7 @@ tb roles [--json]                  # agent ごとの役割ファイル・版・�
 
 ## 送信の記録
 
-tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわらず `messages` に残る(`kind`=report|comment|digest|send|role、
+tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわらず `messages` に残る(`kind`=report|comment|digest|send|role|alert|scheduler、
 `result`=sent|busy|failed、本文)。agent が台帳を書き忘れても、アプリ側の記録は欠けない。
 
 ## 宛先の設定
@@ -196,14 +220,14 @@ tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわ�
 `effect` は `read-only|write|external`、`status` は `open|done|pending-human|denied`。
 `comments(id, task_id, kind, text, deliverables, from_name, from_pane, from_session, delivered_at, created_at)`
 `agent_activity(session_id PK, pane_id, tab_id, workspace_id, cwd, last_prompt_id, last_prompt_at, last_stop_at, updated_at)`
-`messages(id, kind, ref, target, body, result, created_at)` / `approval_changes(id, pattern, value, created_at)` / `role_briefings(id, session_id, agent, role_file, hash, source, via, created_at)` / `outbox(id, from_name, from_pane, from_session, target, kind, task_id, text, status, reason, sent_at, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)`
+`messages(id, kind, ref, target, body, result, created_at)` / `alerts(id, fingerprint, severity, title, body, source, source_pane, status, count, analyst, note, result_*, first_seen, last_seen, analysis_started_at, analyzed_at, closed_at)` / `approval_changes(id, pattern, value, created_at)` / `role_briefings(id, session_id, agent, role_file, hash, source, via, created_at)` / `outbox(id, from_name, from_pane, from_session, target, kind, task_id, text, status, reason, sent_at, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)`
 `tasks.status` は `todo|in_progress|review|done|blocked`。`summary`(done の要約)と `note`(block の理由)は設計メモの最小案への追加。
 時刻は UTC の ISO 8601。
 
 ## 環境変数
 
 `TB_DB`(DB パス) / `TB_CONFIG`(projects.conf) / `HERDR_BIN`(herdr の実体。既定 `herdr`)
-`TB_ROUTES`(routes.conf) / `TB_APPROVALS`(approvals.conf) / `TB_ROLES`(roles/) / `TB_ROLE_MAX`(12000) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
+`TB_ROUTES`(routes.conf) / `TB_ANALYST_MAX`(2) / `TB_ANALYST_CWD` / `TB_ANALYST_MODEL` / `TB_APPROVALS`(approvals.conf) / `TB_ROLES`(roles/) / `TB_ROLE_MAX`(12000) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
 
 ## テスト
 
