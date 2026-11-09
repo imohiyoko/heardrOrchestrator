@@ -251,6 +251,13 @@ class Client:
         return r
 
 
+NOTIFY_TAG = '<script src="/notify.js" defer></script>'
+
+
+def no_js(b):
+    return b.replace(NOTIFY_TAG, "")
+
+
 def mode(path):
     return oct(os.stat(path).st_mode & 0o777)
 
@@ -275,6 +282,18 @@ open(os.path.join(env["WEBUI_SCHED_LOGS"], "job1.log"), "w").write(
 with open(env["WEBUI_DISPATCH"], "w") as f:
     for i in range(40):
         f.write(json.dumps({"ts": f"t{i:02d}", "action": "prompt", "target": "alpha", "prompt": "p" + XSS}) + "\n")
+open(os.path.join(env["WEBUI_SCHED_LOGS"], "job2.log"), "w").write(
+    json.dumps({"ts": "2026-11-06T11:00:00+0900", "job": "job2", "action": "ran", "reason": "exit 0"}) + "\n" +
+    json.dumps({"ts": "2026-11-06T11:10:00+0900", "job": "job2", "action": "skipped", "reason": "busy"}) + "\n" +
+    json.dumps({"ts": "2026-11-06T11:20:00+0900", "job": "job2", "action": "failed", "reason": "exit 3 " + XSS}) + "\n" +
+    json.dumps({"ts": "2026-11-06T11:30:00+0900", "job": "job2", "action": "skipped", "reason": "window"}) + "\n")
+_c = sqlite3.connect(env["WEBUI_TB_DB"])
+_c.execute("INSERT INTO proxy_requests (task_id,cmd,why,effect,status,created_at,updated_at) VALUES "
+           "('T-1','git push " + XSS + "','push したい','remote','pending-human','2026-11-06T00:00:00Z','2026-11-06T00:00:00Z')")
+_c.execute("INSERT INTO proxy_requests (task_id,cmd,why,effect,status,created_at,updated_at) VALUES "
+           "('T-1','ls','見る','none','done','2026-11-06T00:00:00Z','2026-11-06T00:00:00Z')")
+_c.commit()
+_c.close()
 # 旧方式の run/token が残っていても無視される
 os.makedirs(RUN, exist_ok=True)
 open(os.path.join(RUN, "token"), "w").write("legacy-token-legacy-token-legacy-token-0000\n")
@@ -282,7 +301,7 @@ p = start(env)
 port = wait_port(env, p)
 check("起動して port が分かる", port is not None)
 cl = Client(port)
-PAGES = ["/", "/agents", "/agents/alpha", "/tasks", "/tasks/T-1", "/inbox", "/jobs", "/ledger"]
+PAGES = ["/", "/notifications", "/agents", "/agents/alpha", "/tasks", "/tasks/T-1", "/inbox", "/jobs", "/ledger"]
 
 # ---- 初回設定
 for path in PAGES:
@@ -378,7 +397,9 @@ for path in PAGES:
     check(f"GET {path} が 200", s_ == 200, str(s_))
     check(f"{path}: 共通ナビ・meta refresh・バッジ",
           'http-equiv="refresh"' in b and 'href="/ledger"' in b and 'class="badge"' in b, path)
-    check(f"{path}: 生のスクリプトタグなし", "<script" not in b.lower() and "<img" not in b.lower())
+    check(f"{path}: スクリプトは同一オリジンの notify.js だけ",
+          re.findall(r"<script[^>]*>", b, re.I) == [NOTIFY_TAG[:-9]] and "<script" not in no_js(b).lower()
+          and "<img" not in b.lower(), str(re.findall(r"<script[^>]*>", b, re.I)))
     check(f"{path}: 制御文字なし", not re.search("[\x00-\x08\x0b-\x1f\x1b]", b))
     check(f"{path}: ?token= の経路がない", "token=" not in b)
 
@@ -393,7 +414,48 @@ check("未知のタスクは 404", cl.get("/tasks/nope")[0] == 404)
 check("未知の URL は 404", cl.get("/nope")[0] == 404)
 check("パストラバーサル風も 404", cl.get("/agents/..%2F..%2Fetc")[0] == 404)
 inbox = cl.get("/inbox")[2]
-check("承認待ちバッジの件数(question 1 + blocked agent 1)", '<span class="badge">2</span>' in inbox)
+check("承認待ちバッジの件数(question 1 + pending-human 1 + blocked agent 1)", '<span class="badge">3</span>' in inbox)
+
+# ---- 緊急通知(/notifications・/api/notifications・/notify.js)
+r = cl.get("/notifications")
+check("GET /notifications が 200", r[0] == 200, str(r[0]))
+nb = r[2]
+for label in ("質問", "代行依頼", "承認待ちの agent", "滞留", "定期実行の失敗"):
+    check(f"/notifications に {label}", label in nb)
+check("/notifications: 通知ボタンと状態表示", "id=nenable" in nb and "id=nstate" in nb)
+check("/notifications: 外部由来の値はエスケープ", "exit 3 &lt;script&gt;" in nb and "<script>alert" not in nb)
+check("ナビに緊急通知バッジ(5 件)", '<span id=nbadge class="badge">5</span>' in inbox, re.findall(r"<span id=nbadge[^<]*<", inbox))
+r = cl.get("/api/notifications")
+check("/api/notifications が 200 JSON", r[0] == 200 and r[1].get("Content-Type", "").startswith("application/json"), str(r[:2]))
+items = json.loads(r[2])["items"] if r[0] == 200 else []
+ids = [it["id"] for it in items]
+check("通知 id(報告・代行依頼・blocked・滞留・ジョブ失敗)",
+      ids[:2] == ["c:1", "p:1"] and "a:<img src=x onerror=alert(2)>" in ids and "s:alpha:2026-11-06T00:00:00Z" in ids
+      and "j:job2:2026-11-06T11:20:00+0900" in ids and len(ids) == 5, str(ids))
+check("成功したジョブ・完了した代行依頼は通知しない", not any(i.startswith("j:job1") or i == "p:2" for i in ids))
+check("href はすべてサーバー内の絶対パス", all(it["href"].startswith("/") and not it["href"].startswith("//") for it in items))
+check("blocked の通知は承認待ちの内容へ", any(it["href"].endswith("#approval") for it in items if it["kind"] == "agent_blocked"))
+check("通知の値に制御文字なし", not any(re.search("[\x00-\x08\x0b-\x1f\x1b]", str(v)) for it in items for v in it.values()))
+check("/api/notifications も Host 検査", cl.get("/api/notifications", host="evil.example")[0] == 403)
+r = Client(port).get("/api/notifications")
+check("未ログインの /api/notifications は 401(リダイレクトせず中身も出さない)",
+      r[0] == 401 and "Location" not in r[1] and "質問" not in r[2] and "alpha" not in r[2], str(r[:2]))
+check("無効な Cookie の /api/notifications も 401", Client(port).get("/api/notifications", cookie="herdr_webui_session=nope")[0] == 401)
+check("POST /api/notifications は 405", cl.raw("POST", "/api/notifications", {"a": "b"})[0] == 405)
+r = cl.get("/notify.js")
+check("/notify.js が 200 の JavaScript", r[0] == 200 and r[1].get("Content-Type", "").startswith("text/javascript")
+      and "Notification" in r[2] and "/api/notifications" in r[2], str(r[:2]))
+check("/notify.js は innerHTML を使わない", "innerHTML" not in r[2] and "eval(" not in r[2])
+check("未ログインの /notify.js は /login へ", Client(port).get("/notify.js")[0] == 302)
+csp = r[1].get("Content-Security-Policy", "")
+check("CSP は script-src 'self' / connect-src 'self' だけを足す(インラインスクリプト不可)",
+      "default-src 'none'" in csp and "script-src 'self';" in csp and "connect-src 'self';" in csp
+      and "unsafe-inline'; base-uri" in csp and csp.count("unsafe-inline") == 1, csp)
+check("CORP same-origin", r[1].get("Cross-Origin-Resource-Policy") == "same-origin")
+if subprocess.run(["which", "node"], capture_output=True).returncode == 0:
+    jsf = os.path.join(TMP, "notify.js")
+    open(jsf, "w").write(r[2])
+    check("notify.js の構文(node --check)", subprocess.run(["node", "--check", jsf], capture_output=True).returncode == 0)
 check("台帳は直近 30 件", cl.get("/ledger")[2].count("<tr>") == 31)
 check("定期実行が出る", "job1" in cl.get("/jobs")[2])
 
@@ -434,7 +496,7 @@ check("フィルタ値の XSS", "<script>" not in cl.get("/tasks?project=%3Cscri
 bl = cl.get("/agents/%3Cimg%20src%3Dx%20onerror%3Dalert(2)%3E")
 check("blocked の詳細に承認待ちの内容が出る", bl[0] == 200 and "承認待ちの内容" in bl[2] and "Do you want to run?" in bl[2])
 check("ダイアログ内容がエスケープされ ANSI が除かれる",
-      "rm -rf /tmp/x &lt;script&gt;alert(1)&lt;/script&gt;" in bl[2] and "[1m" not in bl[2] and "<script" not in bl[2].lower())
+      "rm -rf /tmp/x &lt;script&gt;alert(1)&lt;/script&gt;" in bl[2] and "[1m" not in bl[2] and "<script" not in no_js(bl[2]).lower())
 check("手元で開くコマンド(readonly 入力)", "readonly" in bl[2] and "herdr agent attach &#x27;&lt;img" in bl[2])
 check("場所(workspace ラベル / tab / pane)", "ws-label" in bl[2] and "w1:p2" in bl[2])
 idle = cl.get("/agents/w1%3Ap3")
@@ -593,7 +655,7 @@ for name, prep in (("nodb", None), ("baddb", lambda e_: open(e_["WEBUI_TB_DB"], 
         c.raw("POST", "/setup", {"csrf": c.csrf("/setup"), "username": USER, "password": PW, "confirm": PW})
         c.cookie = None
         c.login()
-        for path in ["/", "/agents", "/tasks", "/tasks/T-1", "/inbox", "/jobs", "/ledger"]:
+        for path in ["/", "/notifications", "/api/notifications", "/agents", "/tasks", "/tasks/T-1", "/inbox", "/jobs", "/ledger"]:
             s_ = c.get(path)[0]
             check(f"{name}: GET {path}", s_ in (200, 404), str(s_))
         check(f"{name}: サーバー生存", p.poll() is None)
