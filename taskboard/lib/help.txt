@@ -1,0 +1,67 @@
+tb add -p <project> -t <title> [--parent ID] [--owner N] [--session S] [--account A]   → ID を表示
+tb list [-p project] [-s status] [--json]
+tb show <id>
+tb claim <id> --owner <name> [--session S] [--account A]    todo → in_progress(todo 以外は失敗)
+tb update <id> [--status todo|in_progress|review|blocked] [--title T] [--owner N] [--session S] [--account A] [--parent ID]
+tb done <id> -d <成果物> [-d ...] -m <要約>                  成果物と要約が必須。reported_at は空のまま
+tb block <id> [-m <理由>]
+tb report <id>      指示役へ [T-xxx done] ... を送る。成功時のみ reported_at を埋める
+                    終了コード 0=送信済み/報告済み 10=宛先が使用中で未送信 11=送信/状態取得に失敗
+tb pending [--json|--ids]   done なのに未報告のタスク
+
+代行依頼(判定と記録だけ。cmd は tb が実行しない):
+tb proxy-request <task-id> --cmd C --why W --effect read-only|write|external [--expect E]   → "<id> <status>"
+tb proxy-list [--status open|done|pending-human|denied] [--json]
+tb proxy-resolve <id> --status done|pending-human|denied [--result <本文かファイルパス>]
+tb proxy-check <id>   1 行目が allow(自動代行可)か human(人に回す)。mismatch: があれば申告の食い違い
+
+agent の活動記録(hook から。bin/tb-hook 経由が基本):
+tb touch --event UserPromptSubmit|Stop --session-id S [--pane-id P] [--tab-id T] [--workspace-id W] [--cwd D] [--prompt-id I]
+         常に終了コード 0・出力なし。失敗は data/touch-errors.log に 1 行(理由コードのみ)
+tb activity [--json] [--stuck-min N]   最終入力・最終停止・working 推定・滞留(既定 10 分)
+
+報告コメント(worker → 指揮官。報告者は HERDR_PANE_ID と herdr agent list から決まり、上書きできない):
+tb comment <task-id> --kind done|progress|question|blocked --text T [--deliverables a,b] [--json]
+         保存してから送る。終了コード 0=配送済み 10=保存済み・宛先使用中 11=保存済み・送信失敗 3=報告者を特定できず未保存
+tb comments [<task-id>] [--kind K] [--undelivered] [--json]
+         未配送は tb pending に C-<n> として出る。tb report C-<n> で再送
+         question/blocked はすぐ送る。done/progress は保存だけして tb digest でまとめて送る(TB_IMMEDIATE_KINDS で変更)
+
+まとめ送信(scheduler から 10 分おきに呼ぶ想定):
+tb digest [--dry-run]   未配送の報告・未報告の done・観測した事象(turn 終了後も in_progress / 長時間 working / blocked)を
+                        指揮官ごとに 1 通にまとめて送る。宛先が使用中なら送らず次回へ持ち越す。終了コード 0 / 10 / 11
+tb digests [D-<n>] [--json]   送ったまとめの一覧 / 全文
+
+指揮官 → worker の送信(herdr agent prompt を直接打たない。送信者は herdr から決まり、config/routes.conf のルールで許可されたものだけ届く):
+tb send <宛先 agent 名> --text T [--task T-..] [--kind task|info|answer] [--json]
+         終了コード 0=送信済み 10=宛先使用中で outbox に積んだ 11=送信失敗で積んだ 4=ルールで拒否 20=人の承認待ち 3=送信者を特定できず未保存
+tb flush            積まれた送信を届ける(tb digest も最初に呼ぶ)
+tb outbox [--status pending|queued|sent|denied] [--json]
+
+役割の配布(roles/。SessionStart hook は bin/tb-role-hook 経由):
+tb role-context --source startup|resume|clear|compact --session-id S   hook 用。渡すときだけ hook の JSON を出す。常に 0
+tb role-broadcast [agent 名 ...]   動いている agent に役割の置き場所を送る(同じ版を渡し済みのセッションは飛ばす)
+tb roles [--json]                  agent ごとの役割ファイルと、渡した版が最新か(current|outdated|never|no-role)
+
+人の承認(config/approvals.conf。<操作のパターン> = ask|allow、最初に一致した行、無一致は ask):
+tb approval <操作>        1 行目 ask|allow、2 行目 rule:。終了コード 0=allow 20=ask(例: send:task:worker1, role:change, setup:hooks)
+tb allow <パターン>       今後は承認なしにする(人の端末からだけ)
+tb ask <パターン>         承認制に戻す(人の端末からだけ)
+tb approve O-<n> [--always]   承認待ちの送信を届ける。--always なら send:<kind>:<宛先> を allow にする
+tb reject O-<n>               承認待ちの送信を却下する
+
+アラート(見張り役 → 解析役の agent を起動 → 結果を指揮官・Web UI へ):
+tb alert --title T [--body B|--body-file F] [--key K] [--json]   見張り役が登録(緊急度は付けない)
+         → "A-<n> new|duplicate <status>"。新規なら approvals の alert:analyze を見て解析役を起動
+tb alerts [A-<n>] [--status S] [--json]    一覧 / 全文と解析結果
+tb alert-approve A-<n> [--always]          人が解析役の起動を承認(--always で今後は承認なし)
+tb alert-result A-<n> --severity critical|high|medium|low --summary S [--report F]   解析役が緊急度と結果を返す(担当の解析役か人だけ)
+tb alert-dispatch                          承認・上限待ちを進める(tb digest も呼ぶ)
+tb alert-close A-<n>                       人が閉じる
+tb system-send <宛先> --text T --job J      scheduler 用。agent の pane からは使えない
+
+会計役(定期レビュー)→ 設定役(人事。TB_HR_NAME、既定 hr):
+tb review-pack [--since ISO] [--mark]      生ログではなく集計と上位だけのレビュー材料。省略時は前回 --mark 以降
+tb proposal --role <roles のファイル|-> --title T (--text X|--text-file F)   改善提案を設定役へ送る
+tb proposals [P-<n>] [--status open|applied|rejected]
+tb proposal-resolve P-<n> --status applied|rejected [--note N]   設定役か人だけ

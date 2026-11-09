@@ -228,6 +228,20 @@ tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわ�
 `report` は宛先の状態を `herdr agent get` で見て、`idle` / `done` のときだけ送る。
 `working` / `blocked` のほか、`unknown` や取得失敗でも送らない(既定は「割り込まずに pending に積む」)。
 
+## ファイルの構成
+
+`bin/tb` は入口だけで、中身は `lib/` に機能ごとに分かれている。コマンド `tb <名前>` は `lib/*.sh` の `cmd_<名前>` で、一覧を別には持たない(新しいコマンドは関数を足し、`lib/help.txt` に 1 行書く。テストが突き合わせる)。
+
+| ファイル | 中身 |
+|---|---|
+| `lib/db.sh` | `sql` / `q` / スキーマの移行(`schema/NNN_*.sql`) |
+| `lib/core.sh` | エラー終了・入力の検査・タスク行の取得・project ごとの指示役 |
+| `lib/transport.sh` | herdr との境界。herdr を実行するのはここの `herdr_call` だけ。送信と `messages` への記録(`herdr_send`)、`system-send` |
+| `lib/tasks.sh` | add / list / show / claim / update / done / block / report / pending |
+| `lib/proxy.sh` / `activity.sh` / `comments.sh` / `digest.sh` / `send.sh` / `roles.sh` / `approvals.sh` / `alerts.sh` / `review.sh` | 各節のコマンド |
+
+agent への送信も DB への書き込みも、すべて `tb` を通る。後で MCP サーバーなど別の経路を足すときは、`tb` のコマンドを呼ぶか `lib/transport.sh` を差し替えればよい。
+
 ## スキーマ
 
 定義は [`schema/`](schema/) の `NNN_*.sql` にあり、DB の `PRAGMA user_version` より新しい番号だけを tb が順に流す(`lib/db.sh`)。
