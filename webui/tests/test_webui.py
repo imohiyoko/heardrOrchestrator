@@ -77,7 +77,8 @@ def make_env(name, **extra):
     env.update(
         WEBUI_FAIL_DELAY="0", HERDR_BIN=os.path.join(HERE, "fake", "herdr"), FAKE_HERDR_DIR=os.path.join(TMP, "fake"),
         WEBUI_RUN_DIR=os.path.join(d, "run"), WEBUI_TB_DB=os.path.join(d, "tasks.db"),
-        WEBUI_SCHED_LOGS=os.path.join(d, "logs"), WEBUI_DISPATCH=os.path.join(d, "dispatch.jsonl"))
+        WEBUI_SCHED_LOGS=os.path.join(d, "logs"), WEBUI_DISPATCH=os.path.join(d, "dispatch.jsonl"),
+        WEBUI_SCHED_JOBS=os.path.join(d, "jobs"), WEBUI_SCHED_SETTINGS=os.path.join(d, "settings"))
     env.update(extra)
     return env, d
 
@@ -266,6 +267,9 @@ env, d = make_env("main", HERDR_WEBUI_RANGE=f"{base}-{base + 1}", WEBUI_LOCK_SEC
 RUN = env["WEBUI_RUN_DIR"]
 make_db(env["WEBUI_TB_DB"])
 os.makedirs(env["WEBUI_SCHED_LOGS"])
+os.makedirs(env["WEBUI_SCHED_JOBS"])
+open(os.path.join(env["WEBUI_SCHED_JOBS"], "job1.conf"), "w").write(
+    "COMMAND='echo hi'\nWINDOW=09:00-21:00\nINTERVAL_MIN=10\nTZ=Asia/Tokyo\n")
 open(os.path.join(env["WEBUI_SCHED_LOGS"], "job1.log"), "w").write(
     json.dumps({"ts": "2026-11-06T12:00:00+0900", "job": "job1", "action": "ran", "reason": "exit 0", "exit": 0}) + "\n")
 with open(env["WEBUI_DISPATCH"], "w") as f:
@@ -392,6 +396,37 @@ inbox = cl.get("/inbox")[2]
 check("承認待ちバッジの件数(question 1 + blocked agent 1)", '<span class="badge">2</span>' in inbox)
 check("台帳は直近 30 件", cl.get("/ledger")[2].count("<tr>") == 31)
 check("定期実行が出る", "job1" in cl.get("/jobs")[2])
+
+# ---- 定期実行の設定(Web UI から変更できる唯一の操作)
+SET = os.path.join(env["WEBUI_SCHED_SETTINGS"], "job1.settings")
+check("一覧に実際の間隔が出る", "10 分おき / 09:00-21:00 / daily" in cl.get("/jobs")[2])
+r = cl.get("/jobs/job1")
+check("設定フォームが出る(自動更新しない)", r[0] == 200 and 'name=interval_min' in r[2] and 'http-equiv="refresh"' not in r[2])
+check("未知のジョブは 404", cl.get("/jobs/nope")[0] == 404 and cl.raw("POST", "/jobs/nope", {"csrf": cl.csrf("/jobs/job1")})[0] == 404)
+good = {"action": "save", "interval_min": "15", "start": "10:00", "end": "18:00", "days": "weekdays", "enabled": "1"}
+check("CSRF 無しの設定 POST は拒否", cl.raw("POST", "/jobs/job1", good)[0] == 403 and not os.path.exists(SET))
+check("Origin 不一致の設定 POST は拒否",
+      cl.raw("POST", "/jobs/job1", {**good, "csrf": cl.csrf("/jobs/job1")}, origin="http://evil.example")[0] == 403)
+check("未ログインの設定 POST は /login へ", Client(port).raw("POST", "/jobs/job1", good)[0] == 302 and not os.path.exists(SET))
+check("ログイン画面の CSRF(anon)は使えない", cl.raw("POST", "/jobs/job1", {**good, "csrf": cl.csrf("/login")})[0] == 403)
+r = cl.raw("POST", "/jobs/job1", {**good, "csrf": cl.csrf("/jobs/job1")})
+check("保存すると 302 で戻る", r[0] == 302 and r[1].get("Location") == "/jobs/job1?saved=1", str(r[:2]))
+body = open(SET).read() if os.path.exists(SET) else ""
+check("settings に書かれる(0600)", "INTERVAL_MIN=15" in body and "DAYS=weekdays" in body and "ENABLED=1" in body
+      and mode(SET) == "0o600", body)
+check("一覧に反映", "15 分おき / 10:00-18:00 / weekdays" in cl.get("/jobs")[2])
+for bad, label in ((dict(interval_min="0"), "間隔 0"), (dict(interval_min="5; rm"), "間隔に記号"),
+                   (dict(start="25:00"), "開始が範囲外"), (dict(start="19:00"), "開始が終了より後"),
+                   (dict(days="$(id)"), "曜日が不正"), (dict(days="custom"), "曜日を 1 つも選ばない"),
+                   (dict(start="10:00\nCOMMAND=x"), "改行の注入")):
+    r = cl.raw("POST", "/jobs/job1", {**good, **bad, "csrf": cl.csrf("/jobs/job1")})
+    check(f"不正な入力は 400 で書かない: {label}", r[0] == 400 and open(SET).read() == body, str(r[0]))
+r = cl.raw("POST", "/jobs/job1", {**good, "days": "custom", "day_mon": "1", "day_fri": "1", "enabled": "",
+                                  "csrf": cl.csrf("/jobs/job1")})
+check("曜日指定と一時停止", r[0] == 302 and "DAYS=Mon Fri" in open(SET).read() and "ENABLED=0" in open(SET).read())
+check("一時停止が一覧に出る", "一時停止" in cl.get("/jobs")[2])
+r = cl.raw("POST", "/jobs/job1", {"action": "reset", "csrf": cl.csrf("/jobs/job1")})
+check("conf の値に戻すと settings を消す", r[0] == 302 and not os.path.exists(SET) and "10 分おき" in cl.get("/jobs")[2])
 check("tasks のフィルタ", "T-1" in cl.get("/tasks?project=pj&status=in_progress")[2] and "T-1" not in cl.get("/tasks?status=done")[2])
 check("フィルタ値の XSS", "<script>" not in cl.get("/tasks?project=%3Cscript%3E")[2])
 

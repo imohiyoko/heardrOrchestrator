@@ -3,6 +3,8 @@
 #   NOW="YYYY-MM-DD HH:MM"  時刻を差し替える(ジョブの TZ での現地時刻)
 #   DRY_RUN=1               herdr を呼ばず、判定結果を stdout に JSON で出す(ログは書かない)
 #   FAKE_STATE=<state>      DRY_RUN 時に TARGET の状態を仮定する(テスト用)
+# launchd は毎分起動する。実行するかどうか(曜日・時間帯・間隔・一時停止)はここで判定するので、
+# 間隔や時間帯を変えても plist を作り直す必要はない。対象外の回は(DRY_RUN 以外では)何も記録しない。
 set -u
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -18,7 +20,7 @@ if [ -n "${NOW:-}" ]; then
 else
   AT="$(date '+%Y-%m-%d %H:%M')"
 fi
-dow=$(date -j -f '%Y-%m-%d %H:%M' "$AT" '+%u' 2>/dev/null) || die "NOW を解釈できない: ${NOW:-}"
+dow=$(date -j -f '%Y-%m-%d %H:%M' "$AT" '+%u' 2>/dev/null || date -d "$AT" '+%u' 2>/dev/null) || die "NOW を解釈できない: ${NOW:-}"
 cur_min=$(hm_to_min "${AT:11:5}")
 
 emit() { # action reason
@@ -37,11 +39,16 @@ emit() { # action reason
 }
 fail() { emit failed "$1"; exit 1; }
 
-# 1. 曜日・時間帯
-case " $(days_to_nums) " in *" $dow "*) ;; *) emit skipped_window "day $dow not in DAYS ($DAYS)"; exit 0 ;; esac
+# 対象外の回: DRY_RUN では理由を出し、通常は記録せずに終わる(毎分起動のためログを埋めない)
+quiet_skip() { [ "$DRY_RUN" = 1 ] && emit "$1" "$2"; exit 0; }
+
+# 1. 曜日・時間帯・間隔・一時停止
+case " $(days_to_nums) " in *" $dow "*) ;; *) quiet_skip skipped_window "day $dow not in DAYS ($DAYS)" ;; esac
 if ((cur_min < WIN_START || cur_min > WIN_END)); then
-  emit skipped_window "${AT:11:5} outside $WINDOW"; exit 0
+  quiet_skip skipped_window "${AT:11:5} outside $WINDOW"
 fi
+(((cur_min - WIN_START) % INTERVAL_MIN == 0)) || quiet_skip skipped_interval "${AT:11:5} not on the ${INTERVAL_MIN}-min grid from $START"
+[ "$ENABLED" = 1 ] || { emit skipped_disabled "paused (ENABLED=0)"; exit 0; }
 
 # COMMAND 型: agent の状態を見ずにコマンドを実行する
 kill_tree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done; kill -KILL "$1" 2>/dev/null; }

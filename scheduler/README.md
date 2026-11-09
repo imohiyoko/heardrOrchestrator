@@ -17,7 +17,8 @@ launchd が `bin/tick.sh <job>` を指定時刻に起動し、時間帯・曜日
 | `INTERVAL_MIN` | 起動間隔(分)。窓の始端から刻む |
 | `DAYS` | 既定 `daily`。`weekdays` や `"Mon Wed Fri"` |
 | `SKIP_IF` | 既定 `"working blocked"`。該当する状態ならスキップ。idle/done 以外も送らない |
-| `TZ` | 既定 `Asia/Tokyo`。OS のタイムゾーンと違うと gen-plist が拒否する |
+| `TZ` | 既定 `Asia/Tokyo`。判定は tick.sh がこの TZ で行う |
+| `ENABLED` | 既定 `1`。`0` で一時停止 |
 
 ### コマンド実行型ジョブ
 
@@ -30,6 +31,21 @@ launchd が `bin/tick.sh <job>` を指定時刻に起動し、時間帯・曜日
 - ログには `action`(`ran` | `failed` | `skipped_*`)、`exit`、`stdout`、`stderr`(各先頭 500 字)を記録。
 - **`COMMAND` は `bash -c` でそのまま実行される。`jobs/*.conf` は人が管理するもので、外部入力(Slack・ファイル内容・引数など)を埋め込まないこと。**
 
+## Web UI からの変更(settings)
+
+間隔・時間帯・曜日・一時停止は、Web UI の `/jobs/<job>` から変えられる。保存先は `settings/<job>.settings`(git 管理外、0600)。
+
+- launchd は**毎分** `tick.sh` を起動し、実行するかどうか(曜日・時間帯・`INTERVAL_MIN` の刻み・一時停止)は `tick.sh` が実行時に判定する。
+  なので設定を変えても plist の作り直し・再登録は要らない(次の分から反映)。対象外の回はログを書かない
+- 刻みは窓の始端から数える(`START=09:00` `INTERVAL_MIN=15` なら 09:00, 09:15, ...)
+- 優先順: `jobs/<job>.conf` < `settings/<job>.settings` < 環境変数 `SCHED_*`
+- settings は bash として読まない。`INTERVAL_MIN` / `START` / `END` / `DAYS` / `ENABLED` の 5 キーだけを、決まった形で受け付ける
+  (それ以外の行やシンボリックリンクはエラー)。宛先・本文・コマンドは Web UI から変えられない
+- `ENABLED=0` は一時停止(`skipped_disabled` を記録)
+- 実際に効く設定は `bin/show.sh <job>` で JSON 1 行に出る
+
+この版より前に登録した plist は時刻を焼き込んでいるので、一度 `gen-plist.sh` → `install.sh install` をやり直す。
+
 ## 登録・確認・解除
 
 ```bash
@@ -39,14 +55,14 @@ bin/install.sh status <job>     # launchctl print
 bin/install.sh uninstall <job>  # bootout して plist を削除
 ```
 
-conf を書き換えずに一時的に変えたいときは、環境変数 `SCHED_WINDOW` / `SCHED_START` / `SCHED_END` /
-`SCHED_INTERVAL_MIN` で上書きできる(plist にはその値が焼き込まれる)。
+conf を書き換えずに一時的に変えたいときは(Web UI の settings より優先)、環境変数 `SCHED_WINDOW` / `SCHED_START` / `SCHED_END` /
+`SCHED_INTERVAL_MIN` で上書きできる。
 
 ```bash
-SCHED_WINDOW=10:00-18:00 SCHED_INTERVAL_MIN=10 bin/gen-plist.sh <job>
+SCHED_WINDOW=10:00-18:00 SCHED_INTERVAL_MIN=10 bash bin/tick.sh <job>
 ```
 
-conf を変えたら `gen-plist.sh` → `install.sh install` をやり直す(再登録される)。
+plist は毎分起動するだけなので、conf や settings を変えても再登録は要らない。
 
 ## 動作確認
 
@@ -58,5 +74,6 @@ DRY_RUN=1 FAKE_STATE=working NOW="2026-11-05 12:00" bash bin/tick.sh <job>
 
 - `NOW` は `YYYY-MM-DD HH:MM`(ジョブの TZ の現地時刻)。
 - 実行結果は `logs/<job>.log` に JSONL 1 行(`ts, job, action, reason, at, target, pane, state`)。
-  `action` は `sent | skipped_window | skipped_state | failed`。DRY_RUN はログを書かず stdout に出す。
+  `action` は `sent | ran | skipped_state | skipped_disabled | skipped_locked | failed`。窓の外・刻みの外(`skipped_window` / `skipped_interval`)は
+  DRY_RUN のときだけ出す。DRY_RUN はログを書かず stdout に出す。
 - launchd 自体の出力は `logs/launchd-<job>.out / .err`。
