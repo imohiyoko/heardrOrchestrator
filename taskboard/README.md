@@ -269,6 +269,7 @@ DB パスと herdr の既定値は部品で共通の [`lib/herdr-env.sh`](../lib
 bash test/run.sh
 ```
 
+機能ごとのテストは `test/cases/NN_*.sh`(`lib/` のファイルにおおむね対応)で、`run.sh` が番号順に同じシェルで流す。
 `HERDR_BIN` を `test/fake-herdr`(疑似 herdr)に固定して実行する。本物の herdr は呼ばない。
 `FAKE_STATUS`(idle / working / blocked / unknown / missing)で宛先の状態を、`FAKE_PROMPT_RC` で送信の成否を切り替えられる。
 `test/fake-herdr` には実行権限(`chmod +x`)が必要。
