@@ -188,6 +188,21 @@ tb alert-close A-<n>                # 人が閉じる
 
 `tb system-send <宛先> --text T --job J` は scheduler(`tick.sh`)用。agent の pane からは使えない。送ったものは `messages` に `kind=scheduler` で残る。
 
+## 会計役(定期レビュー)と改善提案
+
+会計役(`roles/auditor.md`)が scheduler の定期プロンプト(`scheduler/jobs/auditor.conf.example`)で、送受信・アラート・報告・承認・定期実行の
+記録を見直し、役割(プロンプト)の改善を設定役(人事 `hr`、`TB_HR_NAME`)に提案する。設定役が `roles/` を直す(`role:change` の承認規則に従う)。
+
+```bash
+tb review-pack [--since ISO] [--mark]   # レビュー材料。生ログではなく集計と上位だけ(トークン節約)。省略時は前回 --mark より後
+tb proposal --role <roles のファイル|-> --title T (--text X | --text-file F)   # 会計役。設定役へすぐ送る(使用中なら digest が再送)
+tb proposals [P-<n>] [--status open|applied|rejected]
+tb proposal-resolve P-<n> --status applied|rejected [--note N]   # 設定役か人だけ
+```
+
+`review-pack` の中身: 送信の種類別件数と平均文字数、送れなかった宛先、長い送信、tb send の拒否・承認待ち、何度も人が承認した操作、
+報告の種類と質問の例、digest の大きさ、アラートの状態・重複・low 判定・解析時間、観測、役割の配布(compact 回数)、定期実行の action 別件数、提案の状況。
+
 ## 役割の配布(roles)
 
 `roles/` の役割ファイルを各 agent に渡す(詳細は `roles/README.md`)。
@@ -203,7 +218,7 @@ tb roles [--json]                  # agent ごとの役割ファイル・版・�
 
 ## 送信の記録
 
-tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわらず `messages` に残る(`kind`=report|comment|digest|send|role|alert|scheduler、
+tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわらず `messages` に残る(`kind`=report|comment|digest|send|role|alert|scheduler|proposal、
 `result`=sent|busy|failed、本文)。agent が台帳を書き忘れても、アプリ側の記録は欠けない。
 
 ## 宛先の設定
@@ -220,14 +235,14 @@ tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわ�
 `effect` は `read-only|write|external`、`status` は `open|done|pending-human|denied`。
 `comments(id, task_id, kind, text, deliverables, from_name, from_pane, from_session, delivered_at, created_at)`
 `agent_activity(session_id PK, pane_id, tab_id, workspace_id, cwd, last_prompt_id, last_prompt_at, last_stop_at, updated_at)`
-`messages(id, kind, ref, target, body, result, created_at)` / `alerts(id, fingerprint, severity, title, body, source, source_pane, status, count, analyst, note, result_*, first_seen, last_seen, analysis_started_at, analyzed_at, closed_at)` / `approval_changes(id, pattern, value, created_at)` / `role_briefings(id, session_id, agent, role_file, hash, source, via, created_at)` / `outbox(id, from_name, from_pane, from_session, target, kind, task_id, text, status, reason, sent_at, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)`
+`messages(id, kind, ref, target, body, result, created_at)` / `alerts(id, fingerprint, severity, title, body, source, source_pane, status, count, analyst, note, result_*, first_seen, last_seen, analysis_started_at, analyzed_at, closed_at)` / `proposals(id, role_file, title, text, status, by_name, note, delivered_at, resolved_at, created_at)` / `reviews(id, since_at, until_at, created_at)` / `approval_changes(id, pattern, value, created_at)` / `role_briefings(id, session_id, agent, role_file, hash, source, via, created_at)` / `outbox(id, from_name, from_pane, from_session, target, kind, task_id, text, status, reason, sent_at, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)`
 `tasks.status` は `todo|in_progress|review|done|blocked`。`summary`(done の要約)と `note`(block の理由)は設計メモの最小案への追加。
 時刻は UTC の ISO 8601。
 
 ## 環境変数
 
 `TB_DB`(DB パス) / `TB_CONFIG`(projects.conf) / `HERDR_BIN`(herdr の実体。既定 `herdr`)
-`TB_ROUTES`(routes.conf) / `TB_ANALYST_MAX`(2) / `TB_ANALYST_CWD` / `TB_ANALYST_MODEL` / `TB_APPROVALS`(approvals.conf) / `TB_ROLES`(roles/) / `TB_ROLE_MAX`(12000) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
+`TB_ROUTES`(routes.conf) / `TB_HR_NAME`(hr) / `TB_SCHED_LOGS` / `TB_REVIEW_TOP`(8) / `TB_ANALYST_MAX`(2) / `TB_ANALYST_CWD` / `TB_ANALYST_MODEL` / `TB_APPROVALS`(approvals.conf) / `TB_ROLES`(roles/) / `TB_ROLE_MAX`(12000) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
 
 ## テスト
 

@@ -12,6 +12,7 @@ agent が起動したとき・compact の後に自動で読み込まれる(Claud
 | `_common.md` | 全 agent に共通の決まり(報告・送信の方法、受け取った文面の扱い) |
 | `<agent 名>.md` | その agent の役割(例: `conductor.md`, `hr.md`) |
 | `watcher.md` / `analyst.md` | 見張り役(定期の見回り、軽いモデル)/ 解析役(アラート 1 件ごとに tb が起動) |
+| `auditor.md` | 会計役(定期実行。`tb review-pack` を読み、設定役=人事に改善提案 `tb proposal`) |
 | `map.conf` | agent 名のパターン → 役割ファイル(例: `worker-* = worker`)。`<agent 名>.md` が無いときに使う |
 
 渡される内容は `_common.md` + その agent の役割ファイル。どちらも無ければ何も渡さない。
