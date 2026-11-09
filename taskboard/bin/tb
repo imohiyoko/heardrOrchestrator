@@ -70,7 +70,9 @@ init_db() {
     from_pane    TEXT NOT NULL,
     from_session TEXT NOT NULL,
     delivered_at TEXT,                          -- 宛先へ送れたときだけ埋まる
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    resolved_at  TEXT,                          -- 人が tb resolve で畳んだ時刻(question/blocked のみ)
+    resolved_note TEXT
   );
   CREATE INDEX IF NOT EXISTS comments_task ON comments(task_id);
   CREATE TABLE IF NOT EXISTS agent_activity (
@@ -83,7 +85,14 @@ init_db() {
     last_prompt_at TEXT,    -- UserPromptSubmit の時刻(UTC, ミリ秒)
     last_stop_at   TEXT,    -- Stop の時刻
     updated_at     TEXT NOT NULL
-  );" >/dev/null
+  );" >/dev/null || return 1
+  # 既存 DB の移行(冪等): comments に resolved_at / resolved_note が無ければ足す
+  local col
+  for col in resolved_at resolved_note; do
+    if [[ $(sql "SELECT count(*) FROM pragma_table_info('comments') WHERE name='$col';") == 0 ]]; then
+      sql "ALTER TABLE comments ADD COLUMN $col TEXT;" >/dev/null 2>&1 || true   # 同時実行で先に足された場合は無視
+    fi
+  done
 }
 
 valid_id()      { [[ $1 =~ ^T-[A-Za-z0-9_]+-[0-9]{3,}$ ]] || usage "タスク ID は T-<project>-NNN 形式: $1"; }
@@ -630,12 +639,13 @@ cmd_comment() {
 }
 
 cmd_comments() {
-  local tid="" kind="" und=0 json=0 where="1=1"
+  local tid="" kind="" und=0 open=0 json=0 where="1=1"
   if [[ ${1:-} == T-* ]]; then tid=$1; shift; valid_id "$tid"; fi
   while [[ $# -gt 0 ]]; do
     case $1 in
       --kind) need_arg "$@"; kind=$2; shift 2;;
       --undelivered) und=1; shift;;
+      --open) open=1; shift;;
       --json) json=1; shift;;
       *) usage "comments: 不明な引数 $1";;
     esac
@@ -643,14 +653,54 @@ cmd_comments() {
   [[ -z $tid ]] || where+=" AND task_id=$(q "$tid")"
   if [[ -n $kind ]]; then [[ " $COMMENT_KINDS " == *" $kind "* ]] || usage "comments: --kind は $COMMENT_KINDS"; where+=" AND kind=$(q "$kind")"; fi
   ((und)) && where+=" AND delivered_at IS NULL"
+  ((open)) && where+=" AND kind IN ('question','blocked') AND resolved_at IS NULL"   # 承認待ち
   if ((json)); then
     sql -json "SELECT * FROM comments WHERE $where ORDER BY id;" | jq -c '(. // [])[] | .deliverables |= fromjson | .id = "C-\(.id)"'
   else
     # needs_human: question/blocked は人の判断・承認待ち
-    sql -separator $'\t' "SELECT 'C-'||id, kind, CASE WHEN kind IN ('question','blocked') THEN 'needs-human' ELSE '-' END,
+    sql -separator $'\t' "SELECT 'C-'||id, kind, CASE WHEN kind IN ('question','blocked') AND resolved_at IS NULL THEN 'needs-human'
+           WHEN resolved_at IS NOT NULL THEN 'resolved' ELSE '-' END,
       CASE WHEN delivered_at IS NULL THEN 'undelivered' ELSE 'delivered' END, task_id, from_name,
       replace(replace(text, char(10), ' '), char(9), ' ') FROM comments WHERE $where ORDER BY id;"
   fi
+}
+
+# 人だけが畳める。HERDR_PANE_ID が報告者として登録済みの agent(名前または session が comments.from_* にある)なら拒否。
+# HERDR_PANE_ID がない端末、または agent ではない pane(人のシェル)は許可。pane が設定されているのに確認できないときは安全側で拒否
+deny_if_worker() {
+  local pane=${HERDR_PANE_ID:-} out row name sid hit
+  [[ -n $pane ]] || return 0
+  out=$("$HERDR_BIN" agent list 2>/dev/null) || { echo "tb: herdr agent list に失敗。worker でないことを確認できないため resolve しません" >&2; return 1; }
+  row=$(jq -c --arg p "$pane" '[.result.agents[]? | select(.pane_id==$p)][0] // empty' <<<"$out" 2>/dev/null) || { echo "tb: herdr の応答を読めません。resolve しません" >&2; return 1; }
+  [[ -n $row ]] || return 0
+  name=$(jq -r '.name // ""' <<<"$row"); sid=$(jq -r '.agent_session.value // ""' <<<"$row")
+  hit=$(sql "SELECT count(*) FROM comments WHERE (from_name<>'' AND from_name=$(q "$name")) OR (from_session<>'' AND from_session=$(q "$sid"));")
+  if [[ $hit != 0 ]]; then
+    echo "tb: resolve は人の操作です。報告者として登録された agent(${name:-?} / $pane)の pane からは実行できません" >&2
+    return 1
+  fi
+}
+
+# 終了コード: 0 成功/すでに済み / 1 拒否・存在しない・対象外 / 2 使い方
+cmd_resolve() {
+  [[ $# -ge 1 ]] || usage "resolve <C-n|n> [-m <メモ>]"
+  local ref=${1#C-} note=""; shift
+  [[ $ref =~ ^[0-9]+$ ]] || usage "resolve: ID は C-<数字> か数字: $ref"
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -m|--message) need_arg "$@"; note=$2; shift 2;;
+      *) usage "resolve: 不明な引数 $1";;
+    esac
+  done
+  deny_if_worker || return 1
+  local row kind at
+  row=$(sql -json "SELECT kind, resolved_at FROM comments WHERE id=$ref;" | jq -c '.[0] // empty')
+  [[ -n $row ]] || die "報告が見つかりません: C-$ref"
+  kind=$(jq -r .kind <<<"$row"); at=$(jq -r '.resolved_at // ""' <<<"$row")
+  [[ $kind == question || $kind == blocked ]] || die "resolve できるのは question / blocked だけです(C-$ref は $kind)"
+  if [[ -n $at ]]; then echo "C-$ref はすでに対応済みです($at)"; return 0; fi
+  sql "UPDATE comments SET resolved_at=$(q "$(now)"), resolved_note=NULLIF($(q "$note"),'') WHERE id=$ref AND resolved_at IS NULL;"
+  echo "C-$ref resolved"
 }
 
 cmd_help() {
@@ -680,8 +730,9 @@ tb activity [--json] [--stuck-min N]   最終入力・最終停止・working 推
 報告コメント(worker → 指揮官。報告者は HERDR_PANE_ID と herdr agent list から決まり、上書きできない):
 tb comment <task-id> --kind done|progress|question|blocked --text T [--deliverables a,b] [--json]
          保存してから送る。終了コード 0=配送済み 10=保存済み・宛先使用中 11=保存済み・送信失敗 3=報告者を特定できず未保存
-tb comments [<task-id>] [--kind K] [--undelivered] [--json]
+tb comments [<task-id>] [--kind K] [--undelivered] [--open] [--json]   --open: 未 resolved の question/blocked(承認待ち)
          未配送は tb pending に C-<n> として出る。tb report C-<n> で再送
+tb resolve <C-n|n> [-m メモ]   question/blocked を対応済みにする(人の操作。報告者の agent の pane からは拒否)
 USAGE
 }
 
@@ -691,7 +742,7 @@ main() {
     help|-h|--help) cmd_help; return 0;;
     touch) cmd_touch "$@"; return 0;;   # 常に 0。ツールの有無チェックや init_db の失敗でも止めない
     add|list|show|claim|update|done|block|report|pending|activity) ;;
-    proxy-request|proxy-list|proxy-resolve|proxy-check|comment|comments) ;;
+    proxy-request|proxy-list|proxy-resolve|proxy-check|comment|comments|resolve) ;;
     *) usage "不明なコマンド: $cmd";;
   esac
   need_tools

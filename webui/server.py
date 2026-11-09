@@ -199,12 +199,73 @@ def parse_jsonl(lines):
     return out
 
 
+def comments_has_resolved():
+    """古い DB(resolved_at 列なし)でも落ちないよう、列の有無を毎回確認する。"""
+    return any(r.get("name") == "resolved_at" for r in q("PRAGMA table_info(comments)"))
+
+
+CTX = threading.local()  # リクエストごとの状態(ログイン中の CSRF トークン)
+NOTE_MAX = 200
+RESOLVE_SQL = ("UPDATE comments SET resolved_at=?, resolved_note=? "
+               "WHERE id=? AND kind IN ('question','blocked') AND resolved_at IS NULL")
+
+
+def resolve_comment(cid, note):
+    """人が question/blocked を畳む。DB への書き込みはここだけ(短い別接続、SQL は固定)。
+    返り値: done | noop(畳み済み) | notfound | badkind | busy | nocolumn | nodb"""
+    path = TB_DB()
+    if not os.path.isfile(path):
+        return "nodb"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        c = sqlite3.connect(path, timeout=2)
+    except sqlite3.Error:
+        return "busy"
+    try:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(comments)")}
+        if not {"resolved_at", "resolved_note"} <= cols:
+            return "nocolumn"
+        cur = c.execute(RESOLVE_SQL, (now, note or None, cid))
+        c.commit()
+        if cur.rowcount == 1:
+            return "done"
+        row = c.execute("SELECT kind, resolved_at FROM comments WHERE id=?", (cid,)).fetchone()
+        if row is None:
+            return "notfound"
+        return "badkind" if row[0] not in ("question", "blocked") else "noop"
+    except sqlite3.OperationalError:
+        return "busy"  # database is locked など
+    except sqlite3.Error:
+        return "busy"
+    finally:
+        c.close()
+
+
+def resolvable(c):
+    return c.get("kind") in ("question", "blocked") and not c.get("resolved_at") and "resolved_at" in c
+
+
+def resolve_form(c, back):
+    """「対応済みにする」(人のブラウザの POST だけ。agent の承認ダイアログには付けない)。"""
+    return (f'<form method=post action="/resolve"><input type=hidden name=csrf value="{e(getattr(CTX, "csrf", ""))}">'
+            f'<input type=hidden name=id value="{int(c["id"])}"><input type=hidden name=back value="{e(back)}">'
+            f'<input type=text name=note maxlength={NOTE_MAX} placeholder="メモ(任意・{NOTE_MAX} 字まで)" size=24> '
+            '<button type=submit>対応済みにする</button></form>')
+
+
+def resolved_label(c):
+    if c.get("resolved_at"):
+        return f'対応済み {e(c["resolved_at"])}' + (f'<br>{e(c.get("resolved_note"))}' if c.get("resolved_note") else "")
+    return ""
+
+
 def needs_human():
     """承認待ち: question/blocked の報告(未完了タスク)、pending-human の代行依頼、blocked の agent。"""
+    unresolved = " AND c.resolved_at IS NULL" if comments_has_resolved() else ""
     comments = q(
         "SELECT c.*, t.status AS task_status, t.title AS task_title FROM comments c "
         "LEFT JOIN tasks t ON t.id=c.task_id WHERE c.kind IN ('question','blocked') "
-        "AND COALESCE(t.status,'') != 'done' ORDER BY c.id DESC LIMIT 100")
+        "AND COALESCE(t.status,'') != 'done'" + unresolved + " ORDER BY c.id DESC LIMIT 100")
     proxies = q("SELECT * FROM proxy_requests WHERE status='pending-human' ORDER BY id DESC LIMIT 100")
     agents, _ = get_agents()
     blocked = [a for a in agents if a.get("agent_status") == "blocked"]
@@ -281,7 +342,7 @@ NAV = [("/", "概要"), ("/agents", "agent"), ("/tasks", "タスク"), ("/inbox"
        ("/jobs", "定期実行"), ("/ledger", "台帳")]
 
 
-def page(title, body, path, badge, logout=""):
+def page(title, body, path, badge, logout="", refresh=True):
     links = []
     for href, label in NAV:
         on = path == href or (href != "/" and path.startswith(href + "/"))
@@ -291,12 +352,13 @@ def page(title, body, path, badge, logout=""):
         links.append(f'<a href="{href}"{" class=on" if on else ""}>{label}{b}</a>')
     return (
         "<!doctype html><html lang=ja><head><meta charset=utf-8>"
-        f'<meta http-equiv="refresh" content="{REFRESH_SEC}">'
+        + (f'<meta http-equiv="refresh" content="{REFRESH_SEC}">' if refresh else "") +
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         '<meta name=referrer content=same-origin>'
         f"<title>{e(title)} - herdr</title><style>{CSS}</style></head><body>"
         f"<nav>{''.join(links)}{logout}</nav><main><h1>{e(title)}</h1>{body}"
-        f'<p class=note>自動更新 {REFRESH_SEC} 秒 / 読み取り専用 / 機密を含みうる画面です</p></main></body></html>'
+        + (f'<p class=note>自動更新 {REFRESH_SEC} 秒' if refresh else '<p class=note>入力欄があるため自動更新しません(ブラウザの再読み込みで更新)')
+        + ' / 書き込みは「対応済みにする」だけ / 機密を含みうる画面です</p></main></body></html>'
     )
 
 
@@ -396,7 +458,6 @@ def page_agent(key):
     act = activity_for(a)
     tasks = tasks_for_agent(a)
     sid = agent_session(a) or (tasks[0]["session_id"] if tasks and tasks[0].get("session_id") else None)
-    resume = f"claude --resume {shlex.quote(str(sid))}" if sid else None
     info = [
         ("状態", state_html(a.get("agent_status")) + (' <span class=warn>滞留</span>' if stalled(a, act) else "")),
         ("場所", f'workspace {e(workspace_label(a.get("workspace_id")) or "-")} ({e(a.get("workspace_id"))})'
@@ -406,7 +467,6 @@ def page_agent(key):
         ("最終入力", e(act.get("last_prompt_at") if act else "-")),
         ("最終停止", e(act.get("last_stop_at") if act else "-")),
         ("session_id", f"<code>{e(sid)}</code>" if sid else "-"),
-        ("resume コマンド", f"<code>{e(resume)}</code>" if resume else "-"),
     ]
     body = err_html(err) + "<table>" + "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in info) + "</table>"
     attach = "herdr agent attach " + shlex.quote(str(agent_key(a)))
@@ -419,7 +479,8 @@ def page_agent(key):
         body += ('<p class=note>要約・加工なしの端末表示です。承認の入力はブラウザ上では行えません。'
                  '下のコマンドで手元の herdr から開いて、人が操作してください。</p>')
     body += ('<h2>手元で開く</h2><p><input type=text readonly size=60 value="' + e(attach) +
-             '" onfocus="this.select()"> <span class=note>クリックで全選択 → コピーして手元の端末で実行</span></p>')
+             '"> <span class=note>欄をクリックして全選択(Cmd+A)→ コピーして手元の端末で実行</span></p>'
+             '<p class=warn>別ターミナルで claude --resume を実行しないでください。稼働中の agent と会話が枝分かれします。</p>')
     body += "<h2>担当タスク</h2>" + table(
         ["タスク", "PJ", "題", "状態", "更新"],
         [[tlink(t["id"]), e(t["project"]), e(t["title"]), e(t["status"]), e(t["updated_at"])] for t in tasks])
@@ -491,15 +552,15 @@ def page_task(tid):
                                         "parent_id", "summary", "note", "reported_at", "created_at", "updated_at"]]
     dl = safe_json_list(t["deliverables"])
     info.append(("成果物", "<br>".join(e(x) for x in dl) or "-"))
-    if t.get("session_id"):
-        info.append(("resume コマンド", f'<code>{e("claude --resume " + shlex.quote(t["session_id"]))}</code>'))
     body = "<table>" + "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in info) + "</table>"
     cm = q("SELECT * FROM comments WHERE task_id=? ORDER BY id DESC", (tid,))
+    CTX.norefresh = CTX.norefresh or any(resolvable(c) for c in cm)
     body += "<h2>報告</h2>" + table(
-        ["id", "種別", "本文", "成果物", "from", "配送", "時刻"],
+        ["id", "種別", "本文", "成果物", "from", "配送", "時刻", "対応"],
         [[f"C-{c['id']}", e(c["kind"]), f'<pre>{e(c["text"])}</pre>',
           "<br>".join(e(x) for x in safe_json_list(c["deliverables"])), e(c["from_name"]),
-          "済" if c["delivered_at"] else "未", e(c["created_at"])] for c in cm])
+          "済" if c["delivered_at"] else "未", e(c["created_at"]),
+          resolve_form(c, "/tasks/" + quote(str(tid), safe="")) if resolvable(c) else resolved_label(c)] for c in cm])
     px = q("SELECT * FROM proxy_requests WHERE task_id=? ORDER BY id DESC", (tid,))
     body += "<h2>代行依頼</h2>" + table(
         ["id", "状態", "effect", "コマンド", "理由", "結果"],
@@ -512,9 +573,12 @@ def page_inbox(_qs):
     comments, proxies, blocked = needs_human()
     ids = {c["id"] for c in comments}
     body = "<h2>要対応 (needs-human)</h2>"
-    body += table(["id", "種別", "タスク", "本文", "from", "時刻"],
+    forms = any(resolvable(c) for c in comments)
+    CTX.norefresh = CTX.norefresh or forms
+    body += table(["id", "種別", "タスク", "本文", "from", "時刻", "操作"],
                   [[f"C-{c['id']}", f'<span class=warn>{e(c["kind"])}</span>', tlink(c["task_id"]),
-                    f'<pre>{e(c["text"])}</pre>', e(c["from_name"]), e(c["created_at"])] for c in comments])
+                    f'<pre>{e(c["text"])}</pre>', e(c["from_name"]), e(c["created_at"]),
+                    resolve_form(c, "/inbox") if resolvable(c) else ""] for c in comments])
     body += "<h3>代行依頼 (pending-human)</h3>" + table(
         ["id", "タスク", "effect", "コマンド", "理由"],
         [[e(p["id"]), tlink(p["task_id"]), e(p["effect"]), f'<pre>{e(p["cmd"])}</pre>', e(p["why"])] for p in proxies])
@@ -524,9 +588,9 @@ def page_inbox(_qs):
          for a in blocked])
     rest = [c for c in q("SELECT * FROM comments ORDER BY id DESC LIMIT 60") if c["id"] not in ids][:50]
     body += "<h2>直近の報告</h2>" + table(
-        ["id", "種別", "タスク", "本文", "from", "時刻"],
+        ["id", "種別", "タスク", "本文", "from", "時刻", "状態"],
         [[f"C-{c['id']}", e(c["kind"]), tlink(c["task_id"]), f'<pre>{e(c["text"])}</pre>', e(c["from_name"]),
-          e(c["created_at"])] for c in rest])
+          e(c["created_at"]), resolved_label(c)] for c in rest])
     return "報告・承認待ち", body
 
 
@@ -729,7 +793,7 @@ class Handler(BaseHTTPRequestHandler):
             if st in ("expired", "invalid"):
                 sys.stderr.write(f"reset: denied ({st})\n")
             return self._send(200, reset_page(a, st))
-        if path == "/logout":
+        if path in ("/logout", "/resolve"):
             return self._text(405, "Method Not Allowed", [("Allow", "POST")])
         if not a.configured():
             return self._redirect("/setup")
@@ -739,12 +803,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/login?" + urlencode({"next": auth.safe_next(nx)}))
         logout = (f'<form method=post action="/logout"><input type=hidden name=csrf value="{e(a.form_token("s:" + sh))}">'
                   '<button type=submit>ログアウト</button></form>')
+        CTX.csrf, CTX.norefresh = a.form_token("s:" + sh), False
         try:
             r = route(unquote(path), qs)
             if r is None:
                 return self._send(404, page("見つかりません", "<p>そのページはありません。</p>", "", badge_count(), logout))
             title, body = r
-            self._send(200, page(title, body, path, badge_count(), logout))
+            self._send(200, page(title, body, path, badge_count(), logout, refresh=not CTX.norefresh))
         except Exception as ex:  # 1 ページの失敗でサーバーを落とさない(例外の内容は出さない)
             sys.stderr.write(f"internal error: {type(ex).__name__}\n")
             self._text(500, "Internal Server Error")
@@ -758,11 +823,15 @@ class Handler(BaseHTTPRequestHandler):
         if form is None:
             return self._text(413, "Payload Too Large")
         sh = self._session()
-        ctx = "s:" + sh if path == "/logout" and sh else "anon"
+        if path == "/resolve" and not sh:
+            return self._text(401, "Unauthorized: ログインが必要です")
+        ctx = "s:" + sh if path in ("/logout", "/resolve") and sh else "anon"
         if not a.check_form_token(form.get("csrf"), ctx):
             if path == "/logout" and not sh:
                 return self._redirect("/login")
             return self._text(403, "Forbidden: フォームの有効期限切れです。画面を開き直してください")
+        if path == "/resolve":
+            return self._resolve(form, sh)
         if path == "/logout":
             a.destroy_session(self._session_token())
             return self._redirect("/login", [self._cookie("", 0)])
@@ -837,11 +906,34 @@ class Handler(BaseHTTPRequestHandler):
              ("password", "パスワード", "password", "current-password")], "ログイン",
             error=LOGIN_FAIL + ("(ロックしました)" if wait else ""), next_=nx) + FORGOT))
 
+    def _resolve(self, form, sh):
+        """人が question/blocked の報告を畳む。更新するのは resolved_at / resolved_note だけ。"""
+        back = auth.safe_next(form.get("back", "/inbox"))
+        try:
+            cid = int(form.get("id", ""))
+        except ValueError:
+            return self._text(400, "Bad Request: id が不正です")
+        note = clean(form.get("note", "")).strip()
+        if len(note) > NOTE_MAX:
+            return self._text(400, f"Bad Request: メモは {NOTE_MAX} 字までです")
+        res = resolve_comment(cid, note)
+        rec = self.auth._load() or {}
+        who = clean(str(rec.get("username", "?")))
+        sys.stderr.write(f"resolve: user={who} id=C-{cid} {res}\n")  # メモの本文は残さない
+        msgs = {"notfound": (404, "その報告はありません"), "badkind": (400, "question / blocked 以外は畳めません"),
+                "nodb": (503, "タスク DB がありません"), "nocolumn": (503, "DB に resolved_at 列がありません(tb で移行してください)"),
+                "busy": (503, "DB が使用中です。少し待ってやり直してください")}
+        if res in msgs:
+            code, m = msgs[res]
+            return self._send(code, plain_page("対応済みにできません", err_html(m) + f'<p><a href="{e(back)}">戻る</a></p>'),
+                              extra=[("Retry-After", "3")] if code == 503 else ())
+        return self._redirect(back)  # done / noop(二重実行は無害)
+
     def _handle(self):
         if not self._host_ok():
             return self._text(403, "Forbidden")
         path = urlsplit(self.path).path
-        if self.command == "POST" and path in ("/login", "/setup", "/logout", "/reset"):
+        if self.command == "POST" and path in ("/login", "/setup", "/logout", "/reset", "/resolve"):
             return self._post(path)
         if self.command not in ("GET", "HEAD"):
             return self._text(405, "Method Not Allowed(読み取り専用です)", [("Allow", "GET, HEAD")])

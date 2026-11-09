@@ -298,4 +298,52 @@ eq "comment: project-specific target" "$(lastp | cut -f1)" "prompt cm-conductor"
 eq "comments: --kind filter" "$($TB comments $ct --kind question --json | jq -r .kind | sort -u)" "question"
 eq "comments: all tasks" "$($TB comments --json | wc -l | tr -d ' ')" "$(nrows)"
 
+# --- resolve / --open / 移行
+cols() { sqlite3 "$1" "SELECT group_concat(name) FROM pragma_table_info('comments') WHERE name LIKE 'resolved%';"; }
+OLD=$TMP/old.db
+sqlite3 "$OLD" "CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL,
+  deliverables TEXT NOT NULL DEFAULT '[]', from_name TEXT NOT NULL, from_pane TEXT NOT NULL, from_session TEXT NOT NULL, delivered_at TEXT, created_at TEXT NOT NULL);
+  INSERT INTO comments(task_id,kind,text,from_name,from_pane,from_session,created_at) VALUES ('T-old-001','blocked','old body','w','p','s','2026-01-01T00:00:00Z');"
+eq "migrate: old DB has no resolved cols" "$(cols "$OLD")" ""
+eq "migrate: first run" "$(TB_DB=$OLD rc $TB comments)" "0"
+eq "migrate: cols added" "$(cols "$OLD")" "resolved_at,resolved_note"
+eq "migrate: second run is a no-op" "$(TB_DB=$OLD rc $TB comments) $(cols "$OLD")" "0 resolved_at,resolved_note"
+eq "migrate: existing row kept, resolved NULL" "$(TB_DB=$OLD $TB comments --json | jq -r '[.text,(.resolved_at|tostring),(.resolved_note|tostring)]|join(" ")')" "old body null null"
+eq "migrate: fresh DB has cols" "$(cols "$TB_DB")" "resolved_at,resolved_note"
+
+# 対象: 報告者は worker1(wW:p1)。人の端末(HERDR_PANE_ID なし)と人のシェル pane(wW:p9, agent ではない)は許可
+rt=$($TB add -p rs -t "resolve target")
+HERDR_PANE_ID=wW:p1 $TB comment $rt --kind question --text "Q1 body" >/dev/null 2>&1
+HERDR_PANE_ID=wW:p1 $TB comment $rt --kind blocked  --text "B1 body" >/dev/null 2>&1
+HERDR_PANE_ID=wW:p1 $TB comment $rt --kind progress --text "P1 body" >/dev/null 2>&1
+HERDR_PANE_ID=wW:p1 $TB comment $rt --kind done --text "D1 body" --deliverables /x >/dev/null 2>&1
+cq=$($TB comments $rt --kind question --json | jq -r .id); cb=$($TB comments $rt --kind blocked --json | jq -r .id)
+cp_=$($TB comments $rt --kind progress --json | jq -r .id); cd_=$($TB comments $rt --kind done --json | jq -r .id)
+nq() { $TB comments $rt --open --json | jq -r .id | tr '\n' ' '; }
+eq "open: question+blocked only, unresolved" "$(nq)" "$cq $cb "
+before=$(sqlite3 "$TB_DB" "SELECT text||kind||task_id||from_name FROM comments WHERE id=${cq#C-};")
+
+h() { env -u HERDR_PANE_ID "$@"; }   # 人の端末(外部コマンド用)
+hrc() { ( unset HERDR_PANE_ID; rc "$@" ); }
+eq "resolve: worker pane (registered reporter) refused" "$(HERDR_PANE_ID=wW:p1 rc $TB resolve $cq)" "1"
+eq "resolve: refused → still open" "$(nq)" "$cq $cb "
+eq "resolve: herdr list fails with pane set → refused" "$(FAKE_LIST_FAIL=1 HERDR_PANE_ID=wW:p1 rc $TB resolve $cq)" "1"
+eq "resolve: worker identified by session even if renamed" "$(HERDR_PANE_ID=wW:p1 FAKE_AGENTS='[{"pane_id":"wW:p1","name":"renamed","agent_session":{"value":"sess-w1"}}]' rc $TB resolve $cq)" "1"
+eq "resolve: human terminal (no pane) ok" "$(h $TB resolve $cq -m '確認した' >/dev/null; echo $?)" "0"
+eq "resolve: resolved_at/note set" "$($TB comments $rt --kind question --json | jq -r '[(.resolved_at!=null|tostring),.resolved_note]|join(" ")')" "true 確認した"
+eq "resolve: body/kind unchanged" "$(sqlite3 "$TB_DB" "SELECT text||kind||task_id||from_name FROM comments WHERE id=${cq#C-};")" "$before"
+out=$(h $TB resolve $cq); r=$?
+eq "resolve: twice → exit 0 + message, no change" "$r $(grep -c '対応済み' <<<"$out") $($TB comments $rt --kind question --json | jq -r .resolved_note)" "0 1 確認した"
+eq "open: resolved one drops out" "$(nq)" "$cb "
+eq "resolve: numeric id form works (human shell pane)" "$(HERDR_PANE_ID=wW:p9 rc $TB resolve ${cb#C-})" "0"
+eq "open: now empty" "$(nq)" ""
+eq "resolve: progress refused" "$(hrc $TB resolve $cp_)" "1"
+eq "resolve: done refused" "$(hrc $TB resolve $cd_)" "1"
+eq "resolve: unknown id" "$(hrc $TB resolve C-99999)" "1"
+eq "resolve: bad id format" "$(hrc $TB resolve abc)" "2"
+eq "resolve: no id" "$(hrc $TB resolve)" "2"
+eq "resolve: non-target kinds untouched" "$($TB comments $rt --json | jq -r 'select(.kind=="progress" or .kind=="done") | .resolved_at|tostring' | sort -u)" "null"
+eq "resolve: tsv shows resolved" "$($TB comments $rt --kind question | cut -f3)" "resolved"
+eq "resolve: unresolved tsv shows needs-human" "$(HERDR_PANE_ID=wW:p1 $TB comment $rt --kind question --text Q2 >/dev/null 2>&1; $TB comments $rt --open | cut -f3)" "needs-human"
+
 echo; echo "pass=$pass fail=$fail"; [[ $fail -eq 0 ]]

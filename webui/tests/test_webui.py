@@ -126,7 +126,7 @@ os.makedirs(os.path.join(TMP, "fake"))
 XSS = "<script>alert(1)</script>"
 agents = {"id": "x", "result": {"agents": [
     {"name": "alpha", "agent": "claude", "agent_status": "working", "pane_id": "w1:p1", "workspace_id": "w1",
-     "agent_session": {"kind": "id", "value": "11111111-2222-3333-4444-555555555555"},
+     "agent_session": {"kind": "id", "value": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
      "terminal_title_stripped": "title " + XSS},
     {"name": "<img src=x onerror=alert(2)>", "agent": "claude", "agent_status": "blocked", "pane_id": "w1:p2",
      "workspace_id": "w1"},
@@ -141,7 +141,7 @@ open(os.path.join(TMP, "fake", "dialog.txt"), "w").write(
     "\x1b[1mDo you want to run?\x1b[0m\n> rm -rf /tmp/x " + XSS + "\n  1. Yes\n  2. No\r\n")
 
 
-def make_db(path):
+def make_db(path, resolved=False):
     c = sqlite3.connect(path)
     c.executescript("""
     CREATE TABLE tasks (id TEXT PRIMARY KEY, project TEXT NOT NULL, title TEXT NOT NULL, owner_agent TEXT,
@@ -157,12 +157,15 @@ def make_db(path):
     CREATE TABLE agent_activity (session_id TEXT PRIMARY KEY, pane_id TEXT, tab_id TEXT, workspace_id TEXT, cwd TEXT,
       last_prompt_id TEXT, last_prompt_at TEXT, last_stop_at TEXT, updated_at TEXT NOT NULL);
     """)
-    c.execute("INSERT INTO tasks VALUES ('T-1','pj','題 " + XSS + "','alpha','11111111-2222-3333-4444-555555555555',"
+    c.execute("INSERT INTO tasks VALUES ('T-1','pj','題 " + XSS + "','alpha','aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',"
               "NULL,'in_progress',NULL,'[\"a.md\"]',NULL,NULL,NULL,'2026-11-06T00:00:00Z','2026-11-06T00:00:00Z')")
     c.execute("INSERT INTO comments (task_id,kind,text,from_name,from_pane,from_session,created_at) VALUES "
               "('T-1','question','質問 " + XSS + "','alpha','w1:p1','s','2026-11-06T00:00:00Z')")
-    c.execute("INSERT INTO agent_activity VALUES ('11111111-2222-3333-4444-555555555555','w1:p1',NULL,NULL,NULL,NULL,"
+    c.execute("INSERT INTO agent_activity VALUES ('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee','w1:p1',NULL,NULL,NULL,NULL,"
               "'2026-11-06T00:00:00Z',NULL,'2026-11-06T00:00:00Z')")
+    if resolved:
+        c.execute("ALTER TABLE comments ADD COLUMN resolved_at TEXT")
+        c.execute("ALTER TABLE comments ADD COLUMN resolved_note TEXT")
     c.commit()
     c.close()
 
@@ -381,7 +384,13 @@ for path in PAGES:
 b = cl.get("/agents/alpha")[2]
 check("エスケープされて表示", "&lt;script&gt;alert(1)&lt;/script&gt;" in b)
 check("ANSI/OSC を除去(本文は残る)", "red" in b and "evil title" not in b and "\\x1b" not in b)
-check("resume コマンド", "claude --resume 11111111-2222-3333-4444-555555555555" in b)
+check("session_id は識別用に表示", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in b)
+check("resume コマンドは出さず、attach と注意書きを出す",
+      "claude --resume aaaa" not in b and "herdr agent attach alpha" in b
+      and "別ターミナルで claude --resume を実行しないでください" in b and "枝分かれ" in b)
+for pth in ["/", "/agents", "/agents/alpha", "/agents/w1%3Ap3", "/tasks", "/tasks/T-1", "/inbox"]:
+    check(f"{pth} に resume コマンドの案内がない", "--resume aaaa" not in cl.get(pth)[2] and "resume コマンド" not in cl.get(pth)[2], pth)
+check("タスク詳細に session_id は残る", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in cl.get("/tasks/T-1")[2])
 check("名前に HTML を含む agent も安全", "&lt;img src=x onerror=alert(2)&gt;" in cl.get("/agents")[2])
 check("pane_id フォールバックの URL", cl.get("/agents/w1%3Ap3")[0] == 200)
 check("未知の agent は 404", cl.get("/agents/nope")[0] == 404)
@@ -636,6 +645,115 @@ for host in ("127.0.0.1", "localhost"):
     r = c.raw("POST", "/login", {"csrf": tok("/login"), "username": "u", "password": pw2}, origin=None, host=H)
     check(f"[{host}] Origin も Referer も無い /login は 403(成功後も)", r[0] == 403)
     stop(p)
+
+# ================= 報告を人が畳む(POST /resolve)
+BTN = ">対応済みにする</button>"
+
+
+def boot(name, resolved):
+    base = free_range(1)
+    env, d = make_env(name, HERDR_WEBUI_RANGE=f"{base}-{base}")
+    make_db(env["WEBUI_TB_DB"], resolved=resolved)
+    cdb = sqlite3.connect(env["WEBUI_TB_DB"])
+    for kind, text in (("blocked", "ブロック中 " + XSS), ("progress", "進捗です"), ("done", "完了です")):
+        cdb.execute("INSERT INTO comments (task_id,kind,text,from_name,from_pane,from_session,created_at) VALUES "
+                    "('T-1',?,?,'alpha','w1:p1','s','2026-11-06T00:00:01Z')", (kind, text))
+    cdb.commit()
+    cdb.close()
+    pr = start(env)
+    pt = wait_port(env, pr)
+    c = Client(pt)
+    c.raw("POST", "/setup", {"csrf": c.csrf("/setup"), "username": "resolver", "password": PW, "confirm": PW})
+    c.cookie = None
+    c.login(user="resolver")
+    return pr, pt, env, c
+
+
+def row(env, cid):
+    cdb = sqlite3.connect(env["WEBUI_TB_DB"])
+    r = cdb.execute("SELECT kind, text, resolved_at, resolved_note FROM comments WHERE id=?", (cid,)).fetchone()
+    cdb.close()
+    return r
+
+
+def badge(html_):
+    m = re.search(r'class="badge[^"]*">(\d+)<', html_)
+    return int(m.group(1)) if m else None
+
+
+p, port, env, c = boot("resolve", True)
+inbox = c.get("/inbox")[2]
+check("/inbox に「対応済みにする」(question と blocked の 2 件)", inbox.count(BTN) == 2, str(inbox.count(BTN)))
+check("入力欄は 200 字まで(maxlength)・メモ任意", "maxlength=200" in inbox)
+check("入力欄があるページは自動更新しない", "http-equiv" not in inbox and "自動更新しません" in inbox)
+check("バッジ: 報告 2 + blocked の agent 1", badge(inbox) == 3, str(badge(inbox)))
+ba = c.get("/agents/%3Cimg%20src%3Dx%20onerror%3Dalert(2)%3E")[2]
+check("blocked の agent(herdr の承認ダイアログ)にはボタンを付けない", BTN not in ba and "/resolve" not in ba)
+check("progress / done にはボタンがない", inbox.count('name=id value=') == 2)
+td = c.get("/tasks/T-1")[2]
+check("/tasks/<id> にもボタン(question と blocked)", td.count(BTN) == 2)
+before1, before2 = row(env, 1), row(env, 2)
+good = {"csrf": c.csrf("/inbox"), "id": "1", "back": "/inbox", "note": "確認しました"}
+
+check("未ログインは拒否(401)", Client(port).raw("POST", "/resolve", good)[0] == 401 and row(env, 1)[2] is None)
+check("CSRF トークン無しは 403", c.raw("POST", "/resolve", {k: v for k, v in good.items() if k != "csrf"})[0] == 403)
+check("CSRF トークン改ざんは 403", c.raw("POST", "/resolve", {**good, "csrf": good["csrf"][:-1] + ("0" if good["csrf"][-1] != "0" else "1")})[0] == 403)
+check("ログイン前のトークン(別文脈)は 403", c.raw("POST", "/resolve", {**good, "csrf": Client(port).csrf("/login")})[0] == 403)
+for o, label in [("null", "Origin: null"), ("http://evil.example", "外部オリジン"), (None, "Origin も Referer も無い")]:
+    check(f"{label} は 403", c.raw("POST", "/resolve", good, origin=o)[0] == 403)
+check("拒否の間は DB が変わらない", row(env, 1) == before1)
+
+r = c.raw("POST", "/resolve", good)
+check("成功(302 で元のページへ)", r[0] == 302 and r[1]["Location"] == "/inbox", str(r[:2]))
+after = row(env, 1)
+check("resolved_at と resolved_note だけ更新", after[2] and after[3] == "確認しました" and after[0] == before1[0] and after[1] == before1[1], str(after))
+check("他の報告は変わらない", row(env, 2) == before2)
+inbox2 = c.get("/inbox")[2]
+check("バッジの件数が減る(3 → 2)", badge(inbox2) == 2, str(badge(inbox2)))
+check("畳んだ報告は要対応から消え、直近の報告に「対応済み」で残る", inbox2.count(BTN) == 1 and "対応済み 20" in inbox2 and "確認しました" in inbox2)
+r = c.raw("POST", "/resolve", {**good, "csrf": c.csrf("/inbox"), "note": "別のメモ"})
+check("二重実行は無害(302・時刻とメモは最初のまま)", r[0] == 302 and row(env, 1) == after, str(row(env, 1)))
+check("progress は対象外(400・変わらない)", c.raw("POST", "/resolve", {**good, "csrf": c.csrf("/inbox"), "id": "3"})[0] == 400 and row(env, 3)[2] is None)
+check("done は対象外", c.raw("POST", "/resolve", {**good, "csrf": c.csrf("/inbox"), "id": "4"})[0] == 400 and row(env, 4)[2] is None)
+check("存在しない ID は 404", c.raw("POST", "/resolve", {**good, "csrf": c.csrf("/inbox"), "id": "9999"})[0] == 404)
+check("ID が数値でなければ 400", c.raw("POST", "/resolve", {**good, "csrf": c.csrf("/inbox"), "id": "1; DROP TABLE comments"})[0] == 400)
+check("メモ 201 字は 400", c.raw("POST", "/resolve", {**good, "csrf": c.csrf("/inbox"), "id": "2", "note": "あ" * 201})[0] == 400 and row(env, 2)[2] is None)
+r = c.raw("POST", "/resolve", {**good, "csrf": c.csrf("/inbox"), "id": "2", "note": "", "back": "http://evil.example/"})
+check("メモ無しで成功・back の外部 URL は無視", r[0] == 302 and r[1]["Location"] == "/" and row(env, 2)[2] and row(env, 2)[3] is None, str(r[:2]))
+check("PUT /resolve は 405", c.raw("PUT", "/resolve")[0] == 405 and c.raw("DELETE", "/resolve")[0] == 405)
+check("GET /resolve は 405", c.get("/resolve")[0] == 405)
+td = c.get("/tasks/T-1")[2]
+check("/tasks/<id> は畳み済みを表示し、ボタンは無い", BTN not in td and "対応済み 20" in td and "http-equiv" in td)
+
+# DB ロック中は 503
+cdb = sqlite3.connect(env["WEBUI_TB_DB"], timeout=0)
+cdb.execute("UPDATE comments SET resolved_at=NULL, resolved_note=NULL WHERE id=2")
+cdb.commit()
+cdb.execute("BEGIN EXCLUSIVE")
+r = c.raw("POST", "/resolve", {**good, "csrf": c.csrf("/inbox"), "id": "2", "note": ""}) if False else None
+cdb.rollback()
+cdb.execute("BEGIN IMMEDIATE")
+cs_ = c.csrf("/tasks/T-1")
+r = c.raw("POST", "/resolve", {**good, "csrf": cs_, "id": "2", "note": ""})
+check("DB ロック中は 503(Retry-After つき)", r[0] == 503 and "Retry-After" in r[1] and "使用中" in r[2], str(r[0]))
+cdb.rollback()
+cdb.close()
+check("ロック解除後は成功", c.raw("POST", "/resolve", {**good, "csrf": c.csrf("/inbox"), "id": "2", "note": ""})[0] == 302 and row(env, 2)[2])
+
+out = stop_out(p)
+check("操作ログ: ユーザー名・ID・結果が 1 行で残る", "resolve: user=resolver id=C-1 done" in out and "resolve: user=resolver id=C-1 noop" in out, out[-500:])
+check("操作ログにメモの本文を残さない", "確認しました" not in out and "別のメモ" not in out)
+
+# 古い DB(resolved_at 無し)
+p, port, env, c = boot("resolve-old", False)
+for path in ["/inbox", "/tasks/T-1", "/", "/agents"]:
+    r = c.get(path)
+    check(f"古い DB でも {path} が崩れない", r[0] == 200 and "Traceback" not in r[2])
+ib = c.get("/inbox")[2]
+check("古い DB: 報告は表示され、ボタンは出さない", "質問" in ib and BTN not in ib and badge(ib) == 3, str(badge(ib)))
+r = c.raw("POST", "/resolve", {"csrf": c.csrf("/inbox"), "id": "1", "back": "/inbox"})
+check("古い DB への resolve は 503(列が無い)で、DB は変わらない", r[0] == 503 and "resolved_at" in r[2], str(r[0]))
+stop(p)
 
 print()
 print("FAILED: " + ", ".join(fails) if fails else "all passed")
