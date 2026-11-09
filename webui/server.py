@@ -259,6 +259,71 @@ def tasks_for_agent(a):
     return rows
 
 
+NOTIFY_POLL_SEC = 15
+NOTIFY_MAX = 100
+
+
+def _short(s, n=200):
+    s = clean("" if s is None else s).strip()
+    return s[:n] + ("…" if len(s) > n else "")
+
+
+def failed_jobs():
+    """最後の実行(ran/failed/sent)が failed のジョブ。[(job, record)]。"""
+    try:
+        names = sorted(n[:-4] for n in os.listdir(SCHED_LOGS()) if n.endswith(".log") and JOB_RE.fullmatch(n[:-4]))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        recs = parse_jsonl(tail_lines(os.path.join(SCHED_LOGS(), n + ".log"), 200))
+        ran = [r for r in recs if r.get("action") in ("ran", "failed", "sent")]
+        if ran and ran[-1].get("action") == "failed":
+            out.append((n, ran[-1]))
+    return out
+
+
+def urgent_items():
+    """10 分のまとめ送信を待たずに知らせるもの。各要素は通知 1 件(id は同じ事象なら同じ値)。
+
+    値はすべて clean 済みのプレーンテキスト。href は常にこのサーバー内の絶対パス。
+    """
+    def load():
+        comments, proxies, blocked = needs_human()
+        items = []
+        for c in comments:
+            items.append({"id": f"c:{c['id']}", "kind": "comment_" + str(c["kind"]),
+                          "label": "質問" if c["kind"] == "question" else "ブロック報告",
+                          "title": _short(f"{c['task_id']} {c.get('task_title') or ''}", 80),
+                          "body": _short(f"{c['from_name']}: {c['text']}"),
+                          "href": "/tasks/" + quote(str(c["task_id"]), safe=""), "ts": clean(c.get("created_at") or "")})
+        for r in proxies:
+            items.append({"id": f"p:{r['id']}", "kind": "proxy_pending", "label": "代行依頼(人の判断待ち)",
+                          "title": _short(f"{r['task_id']} {r.get('effect') or ''}", 80),
+                          "body": _short(f"{r['cmd']} / 理由: {r['why']}"),
+                          "href": "/tasks/" + quote(str(r["task_id"]), safe=""), "ts": clean(r.get("updated_at") or "")})
+        agents, _ = get_agents()
+        for a in blocked:
+            k = agent_key(a)
+            items.append({"id": "a:" + clean(k), "kind": "agent_blocked", "label": "承認待ちの agent",
+                          "title": _short(k, 80), "body": _short(a.get("terminal_title_stripped") or a.get("terminal_title") or "人の対応待ち"),
+                          "href": f"/agents/{quote(k, safe='')}#approval", "ts": ""})
+        for a in agents:
+            act = activity_for(a)
+            if stalled(a, act):
+                k = agent_key(a)
+                items.append({"id": f"s:{clean(k)}:{clean(act.get('last_prompt_at'))}", "kind": "agent_stalled",
+                              "label": f"滞留({STALL_MIN} 分超)", "title": _short(k, 80),
+                              "body": _short(f"working のまま。最終入力 {act.get('last_prompt_at')}"),
+                              "href": f"/agents/{quote(k, safe='')}", "ts": clean(act.get("last_prompt_at") or "")})
+        for n, r in failed_jobs():
+            items.append({"id": f"j:{n}:{clean(r.get('ts'))}", "kind": "job_failed", "label": "定期実行の失敗",
+                          "title": n, "body": _short(r.get("reason") or "failed"),
+                          "href": "/jobs/" + quote(n), "ts": clean(r.get("ts") or "")})
+        return items[:NOTIFY_MAX]
+    return cached("urgent", load)
+
+
 # ---------------------------------------------------------------- HTML
 
 CSS = """
@@ -280,8 +345,8 @@ code{background:#eaeef2;padding:1px 4px;border-radius:3px}
 .note{color:#6e7781;font-size:12px}.err{background:#ffebe9;border:1px solid #cf222e;padding:6px 10px}
 """
 
-NAV = [("/", "概要"), ("/agents", "agent"), ("/tasks", "タスク"), ("/inbox", "報告・承認待ち"),
-       ("/jobs", "定期実行"), ("/ledger", "台帳")]
+NAV = [("/", "概要"), ("/notifications", "緊急通知"), ("/agents", "agent"), ("/tasks", "タスク"),
+       ("/inbox", "報告・承認待ち"), ("/jobs", "定期実行"), ("/ledger", "台帳")]
 
 
 def page(title, body, path, badge, logout="", refresh=True):
@@ -291,15 +356,19 @@ def page(title, body, path, badge, logout="", refresh=True):
         b = ""
         if href == "/inbox":
             b = f'<span class="badge{"" if badge else " zero"}">{badge}</span>'
+        elif href == "/notifications":
+            n = len(urgent_items())
+            b = f'<span id=nbadge class="badge{"" if n else " zero"}">{n}</span>'
         links.append(f'<a href="{href}"{" class=on" if on else ""}>{label}{b}</a>')
     return (
         "<!doctype html><html lang=ja><head><meta charset=utf-8>"
         + (f'<meta http-equiv="refresh" content="{REFRESH_SEC}">' if refresh else "") +
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         '<meta name=referrer content=same-origin>'
-        f"<title>{e(title)} - herdr</title><style>{CSS}</style></head><body>"
+        f"<title>{e(title)} - herdr</title><style>{CSS}</style>"
+        '<script src="/notify.js" defer></script></head><body>'
         f"<nav>{''.join(links)}{logout}</nav><main><h1>{e(title)}</h1>{body}"
-        f'<p class=note>{f"自動更新 {REFRESH_SEC} 秒" if refresh else "自動更新なし"} / 変更できるのは定期実行の設定だけ / 機密を含みうる画面です</p></main></body></html>'
+        f'<p class=note>{f"自動更新 {REFRESH_SEC} 秒" if refresh else "自動更新なし"} / 変更できるのは定期実行の設定だけ / 機密を含みうる画面です / Chrome 通知は「緊急通知」で設定</p></main></body></html>'
     )
 
 
@@ -686,7 +755,22 @@ def page_ledger(_qs):
     return "台帳 (直近 30 件)", table(["時刻", "action", "宛先", "profile", "承認", "送った内容(先頭)", "結果"], rows)
 
 
-STATIC = {"/": page_overview, "/agents": page_agents, "/tasks": page_tasks, "/inbox": page_inbox,
+def page_notifications(_qs):
+    items = urgent_items()
+    body = ("<p>10 分おきのまとめ送信を待たずに知らせるものです。開いている間、"
+            f"{NOTIFY_POLL_SEC} 秒ごとに確認し、新しく出たものを Chrome のデスクトップ通知で出します。</p>"
+            "<p><span id=nstate class=note>Chrome 通知: JavaScript が無効か、読み込み中です</span> "
+            "<button type=button id=nenable hidden>Chrome 通知を有効にする</button></p>")
+    body += table(["種別", "対象", "内容", "時刻"],
+                  [[f'<span class=warn>{e(it["label"])}</span>', f'<a href="{e(it["href"])}">{e(it["title"])}</a>',
+                    e(it["body"]), e(it["ts"])] for it in items])
+    body += ("<p class=note>対象: 未完了タスクの question/blocked 報告、pending-human の代行依頼、blocked の agent、"
+             f"working のまま {STALL_MIN} 分超の agent、最後の実行が失敗した定期実行。"
+             "通知は Web UI のタブが 1 つ開いている間だけ届きます(タブを閉じると止まる)。</p>")
+    return "緊急通知", body
+
+
+STATIC = {"/": page_overview, "/notifications": page_notifications, "/agents": page_agents, "/tasks": page_tasks, "/inbox": page_inbox,
           "/jobs": page_jobs, "/ledger": page_ledger}
 
 
@@ -703,6 +787,62 @@ def route(path, qs):
         r = page_agent(key) if m.group(1) == "agents" else page_task(key)
         return r
     return None
+
+
+NOTIFY_JS = """(function () {
+  "use strict";
+  var KEY = "herdr-webui-notified", POLL = %d;
+  var badge = document.getElementById("nbadge");
+  var state = document.getElementById("nstate");
+  var btn = document.getElementById("nenable");
+  function supported() { return "Notification" in window; }
+  function load() {
+    try { var v = JSON.parse(localStorage.getItem(KEY)); return v && typeof v === "object" ? v : null; }
+    catch (x) { return null; }
+  }
+  function save(v) { try { localStorage.setItem(KEY, JSON.stringify(v)); } catch (x) {} }
+  function showState() {
+    if (!state) return;
+    var t;
+    if (!supported()) t = "このブラウザはデスクトップ通知に対応していません";
+    else if (Notification.permission === "granted") t = "Chrome 通知: 有効";
+    else if (Notification.permission === "denied") t = "Chrome 通知: ブロック中(アドレスバー左のサイト情報から通知を許可してください)";
+    else t = "Chrome 通知: まだ許可していません";
+    state.textContent = t;
+    if (btn) btn.hidden = !supported() || Notification.permission !== "default";
+  }
+  function safeHref(h) { return typeof h === "string" && h.charAt(0) === "/" && h.charAt(1) !== "/" && h.charAt(1) !== "\\\\"; }
+  function notify(it) {
+    var n = new Notification("[herdr] " + it.label + ": " + it.title, {body: it.body, tag: "herdr-" + it.id});
+    n.onclick = function () { window.focus(); if (safeHref(it.href)) location.href = it.href; n.close(); };
+  }
+  if (btn) btn.addEventListener("click", function () {
+    Notification.requestPermission().then(function (p) {
+      showState();
+      if (p === "granted") new Notification("[herdr] 通知を有効にしました", {body: "新しい緊急通知をここに出します", tag: "herdr-enabled"});
+    });
+  });
+  function poll() {
+    fetch("/api/notifications", {credentials: "same-origin", cache: "no-store", headers: {"Accept": "application/json"}})
+      .then(function (r) { if (!r.ok) throw new Error("status " + r.status); return r.json(); })
+      .then(function (d) {
+        var items = Array.isArray(d.items) ? d.items : [];
+        if (badge) { badge.textContent = String(items.length); badge.className = items.length ? "badge" : "badge zero"; }
+        var seen = load(), first = seen === null, now = {};
+        var ok = supported() && Notification.permission === "granted";
+        items.forEach(function (it) {
+          now[it.id] = 1;
+          if (!first && !seen[it.id] && ok) notify(it);
+        });
+        save(now);
+      })
+      .catch(function () {});
+  }
+  showState();
+  poll();
+  setInterval(poll, POLL);
+})();
+""" % (NOTIFY_POLL_SEC * 1000)
 
 
 # ---------------------------------------------------------------- HTTP
@@ -772,7 +912,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy",
-                         "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+                         "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; "
+                         "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         for k, v in extra:
             self.send_header(k, v)
         self.end_headers()
@@ -858,6 +1000,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, reset_page(a, st))
         if path == "/logout":
             return self._text(405, "Method Not Allowed", [("Allow", "POST")])
+        if path == "/api/notifications":  # スクリプト用。未ログインはリダイレクトせず 401
+            if not a.configured() or not self._session():
+                return self._send(401, '{"error":"login required"}', "application/json; charset=utf-8")
+            try:
+                data = json.dumps({"items": urgent_items(), "poll_sec": NOTIFY_POLL_SEC}, ensure_ascii=False)
+            except Exception as ex:
+                sys.stderr.write(f"internal error: {type(ex).__name__}\n")
+                return self._text(500, "Internal Server Error")
+            return self._send(200, data, "application/json; charset=utf-8")
         if not a.configured():
             return self._redirect("/setup")
         sh = self._session()
@@ -866,6 +1017,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/login?" + urlencode({"next": auth.safe_next(nx)}))
         logout = (f'<form method=post action="/logout"><input type=hidden name=csrf value="{e(a.form_token("s:" + sh))}">'
                   '<button type=submit>ログアウト</button></form>')
+        if path == "/notify.js":
+            return self._send(200, NOTIFY_JS, "text/javascript; charset=utf-8")
         try:
             m = re.fullmatch(r"/jobs/([^/]+)/?", unquote(path))
             if m:  # 設定フォーム(自動更新しない)
