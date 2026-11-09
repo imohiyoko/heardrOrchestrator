@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# 疑似 launchctl。print gui/<uid>/<label> は FAKE_LOADED(空白区切りのラベル)にあれば成功。
+# 呼ばれた引数を FAKE_LOG に残す(print 以外が呼ばれていないかをテストで見る)
+echo "launchctl $*" >>"${FAKE_LOG:-/dev/null}"
+[ "$1" = print ] || { echo "fake launchctl: refused: $*" >&2; exit 99; }
+label=${2##*/}
+case " ${FAKE_LOADED:-} " in *" $label "*) echo "$label = { state = running }" ;; *) exit 113 ;; esac

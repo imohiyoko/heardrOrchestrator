@@ -5,6 +5,8 @@ Python 3 の標準ライブラリだけで動く(依存なし)。
 
 - サーバー側で HTML を組み立てる複数ページ構成(SPA ではない)。自動更新は `<meta http-equiv="refresh">`(8 秒)。
 - 全ページに共通ナビと、承認待ち件数のバッジ(報告の question/blocked + `pending-human` の代行依頼 + blocked の agent)。
+- まとめ送信(10 分おき)より急ぐものは「緊急通知」(`/notifications`)に集め、ナビにも件数バッジを出す。
+  Web UI のタブが開いていれば、新しく出たものを Chrome のデスクトップ通知でも出す(下の「緊急通知」)。
 - **変更できるのは定期実行のスケジュールだけ**(`/jobs/<job>`: 間隔・時間帯・曜日・一時停止)。それ以外は読み取り専用で、POST/PUT/DELETE/PATCH は 405。
   承認ボタンはない(承認は人が別の経路で行う)。
 
@@ -88,6 +90,8 @@ POST/PUT/DELETE/PATCH は 405。
 | URL | 内容 |
 | --- | --- |
 | `/` | 概要(承認待ち、agent の状態、滞留、直近の完了) |
+| `/notifications` | 緊急通知の一覧と、Chrome 通知を有効にするボタン |
+| `/api/notifications` | 緊急通知の JSON(`/notify.js` が 15 秒ごとに取得。未ログインは 401) |
 | `/agents` | agent 一覧(状態・workspace・いま何を・最終入力/停止・警告) |
 | `/agents/<名前>` | 状態、担当タスク、直近の出力(`herdr agent read`)、最終入力/停止、`session_id`、`claude --resume <session_id>` |
 | `/tasks`, `/tasks/<id>` | タスク一覧(`?project=` `?status=` で絞り込み)と詳細(報告・成果物・代行依頼) |
@@ -107,12 +111,28 @@ POST/PUT/DELETE/PATCH は 405。
 
 「滞留」は、`working` のまま最終入力(`agent_activity.last_prompt_at`)から 30 分を超えて停止がない agent。
 
+## 緊急通知
+
+10 分おきのまとめ送信を待たずに知らせるもの。
+
+- 未完了タスクの `question` / `blocked` の報告
+- `pending-human` の代行依頼
+- `blocked` の agent(承認待ち)
+- 滞留している agent
+- 最後の実行(`ran`/`failed`/`sent`)が `failed` の定期実行(次に成功すると消える)
+
+Chrome 通知の使い方: `/notifications` を開いて「Chrome 通知を有効にする」を押し、許可する。
+以後、Web UI のどれかのタブが開いている間、`/notify.js` が 15 秒ごとに `/api/notifications` を見て、
+前回なかった項目だけを通知する(既読の管理はブラウザの localStorage。通知をクリックすると該当ページへ)。
+タブを閉じると通知は止まる(Service Worker・Push は使わない)。最初に開いたときに既にあるものは通知せず、一覧とバッジで見る。
+`127.0.0.1` はブラウザ上で安全なコンテキスト扱いなので、HTTPS なしで通知を使える。
+
 ## 承認待ちの対応(手元の herdr で行う)
 
 blocked の agent は `/inbox` からリンクで `/agents/<名前>#approval` に飛べる。そこに次を出す。
 
 - **承認待ちの内容**: `herdr agent read` の直近の画面(承認ダイアログ部分)を、ANSI を除いて HTML エスケープしただけで表示する。要約・加工はしない。
-- **手元で開く**: `herdr agent attach <名前>`(名前が無い agent は `pane_id`)をコピー用の入力欄に出す。JS は使わず、`readonly` の入力欄を選択してコピーする。
+- **手元で開く**: `herdr agent attach <名前>`(名前が無い agent は `pane_id`)をコピー用の入力欄に出す。`readonly` の入力欄を選択してコピーする。
 - **場所**: workspace ラベル / tab / pane_id。
 
 **方針: ブラウザからは承認の入力をしない。** 承認ボタンも `send-keys` も作らない。内容を見て、手元の端末で `herdr agent attach` して、人が操作する。
@@ -123,7 +143,9 @@ ttyd(ブラウザ上の端末)は採用しない。署名が無効で、会社�
 
 - `127.0.0.1` のみで待ち受ける。Host ヘッダが自分以外なら 403(DNS リバインディング対策)。
 - agent の出力・タスク本文・ログなど外部由来の文字列は、ANSI 等の制御文字を除いたうえで HTML エスケープして出す。
-  JS は使わず、CSP(`default-src 'none'`)も付けている。
+  CSP は `default-src 'none'` を基本に、`script-src 'self'` と `connect-src 'self'` だけを許す。JS は同一オリジンの
+  `/notify.js`(通知のポーリングだけ。ログイン必須)の 1 本で、インラインスクリプトは使えない。通知の文面は
+  `textContent` と Notification の本文(プレーンテキスト)にしか入れない。
 - ログ(launchd の out/err を含む)には、メソッド・パス・状態コードだけを出す。クエリ、Cookie、フォーム本文、
   パスワード、セッション値、例外のメッセージは出さない。ログイン成否も理由を区別せず `login: ok/failed/locked` のみ。
 

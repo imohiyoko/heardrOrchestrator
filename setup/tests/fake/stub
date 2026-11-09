@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "fake $0 $*" >>"${FAKE_LOG:-/dev/null}"
