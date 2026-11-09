@@ -302,6 +302,11 @@ def urgent_items():
                           "title": _short(f"{r['task_id']} {r.get('effect') or ''}", 80),
                           "body": _short(f"{r['cmd']} / 理由: {r['why']}"),
                           "href": "/tasks/" + quote(str(r["task_id"]), safe=""), "ts": clean(r.get("updated_at") or "")})
+        for o in q("SELECT * FROM outbox WHERE status='pending' ORDER BY id DESC LIMIT 100"):
+            items.append({"id": f"o:{o['id']}", "kind": "send_pending", "label": "送信の承認待ち",
+                          "title": _short(f"O-{o['id']} {o['from_name']} → {o['target']} ({o['kind']})", 80),
+                          "body": _short(f"{o['text']} / 手元で tb approve O-{o['id']}(今後も許可なら --always)か tb reject O-{o['id']}"),
+                          "href": "/notifications", "ts": clean(o.get("created_at") or "")})
         agents, _ = get_agents()
         for a in blocked:
             k = agent_key(a)
