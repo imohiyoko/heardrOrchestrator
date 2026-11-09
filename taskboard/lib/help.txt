@@ -23,8 +23,9 @@ tb activity [--json] [--stuck-min N]   最終入力・最終停止・working 推
 報告コメント(worker → 指揮官。報告者は HERDR_PANE_ID と herdr agent list から決まり、上書きできない):
 tb comment <task-id> --kind done|progress|question|blocked --text T [--deliverables a,b] [--json]
          保存してから送る。終了コード 0=配送済み 10=保存済み・宛先使用中 11=保存済み・送信失敗 3=報告者を特定できず未保存
-tb comments [<task-id>] [--kind K] [--undelivered] [--json]
+tb comments [<task-id>] [--kind K] [--undelivered] [--open] [--json]   --open: 未対応の question/blocked だけ
          未配送は tb pending に C-<n> として出る。tb report C-<n> で再送
+tb resolve C-<n> [-m メモ]   question/blocked の報告を対応済みにする(人の操作。agent の pane からは拒否)
          question/blocked はすぐ送る。done/progress は保存だけして tb digest でまとめて送る(TB_IMMEDIATE_KINDS で変更)
 
 まとめ送信(scheduler から 10 分おきに呼ぶ想定):
