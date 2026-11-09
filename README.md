@@ -21,6 +21,7 @@ conductor  <--- reports ---  workers (herdr panes)
 | [`herdr-up.sh`](herdr-up.sh) | Creates workspaces and starts agents from a preset |
 | [`conductor/`](conductor/README.md) | Description of the conductor role |
 | [`roles/`](roles/README.md) | Role files handed to each agent on startup / after compact (SessionStart hook), maintained by the HR agent |
+| [`lib/`](lib/herdr-env.sh) | Defaults shared by every component (repo root, DB path, herdr binary, schema dir), in bash and Python |
 | [`setup/`](setup/README.md) | Setup agent (`./herdr-up.sh setup`) that walks you through the setup and asks before writing any settings, plus a read-only doctor `setup/check.sh` |
 
 ## Usage
@@ -28,6 +29,7 @@ conductor  <--- reports ---  workers (herdr panes)
 Each component has its own README and test script:
 
 ```
+bash tests/run-all.sh          # 全部(GitHub Actions でも同じものを流す)
 bash taskboard/test/run.sh
 bash webui/tests/run.sh
 bash scheduler/tests/run.sh

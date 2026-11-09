@@ -230,6 +230,10 @@ tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわ�
 
 ## スキーマ
 
+定義は [`schema/`](schema/) の `NNN_*.sql` にあり、DB の `PRAGMA user_version` より新しい番号だけを tb が順に流す(`lib/db.sh`)。
+版が最新なら `PRAGMA` を 1 回読むだけで済む。テーブルや列を変えるときは既存ファイルを書き換えず、次の番号のファイルを足す。
+版を付ける前に作られた DB(`user_version=0`)も、中身を保ったまま最新になる。
+
 `tasks(id, project, title, owner_agent, session_id, account, status, parent_id, deliverables(JSON 配列), summary, note, reported_at, created_at, updated_at)`
 `proxy_requests(id, task_id, cmd, why, effect, expect, status, result, created_at, updated_at)`
 `effect` は `read-only|write|external`、`status` は `open|done|pending-human|denied`。
@@ -241,7 +245,8 @@ tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわ�
 
 ## 環境変数
 
-`TB_DB`(DB パス) / `TB_CONFIG`(projects.conf) / `HERDR_BIN`(herdr の実体。既定 `herdr`)
+`TB_DB`(DB パス) / `TB_CONFIG`(projects.conf) / `HERDR_BIN`(herdr の実体。既定 `herdr`) / `TB_SCHEMA_DIR`(テスト用)
+DB パスと herdr の既定値は部品で共通の [`lib/herdr-env.sh`](../lib/herdr-env.sh)(Python は `lib/herdr_env.py`)で決まる。
 `TB_ROUTES`(routes.conf) / `TB_HR_NAME`(hr) / `TB_SCHED_LOGS` / `TB_REVIEW_TOP`(8) / `TB_ANALYST_MAX`(2) / `TB_ANALYST_CWD` / `TB_ANALYST_MODEL` / `TB_APPROVALS`(approvals.conf) / `TB_ROLES`(roles/) / `TB_ROLE_MAX`(12000) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
 
 ## テスト

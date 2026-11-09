@@ -7,7 +7,9 @@ JOBS_DIR="${JOBS_DIR:-$SCHED_ROOT/jobs}"
 LOG_DIR="${LOG_DIR:-$SCHED_ROOT/logs}"
 # Web UI などが書く上書き設定(<job>.settings)の置き場
 SETTINGS_DIR="${SCHED_SETTINGS_DIR:-$SCHED_ROOT/settings}"
-HERDR="${HERDR_BIN:-/opt/homebrew/bin/herdr}"
+# shellcheck source=../../lib/herdr-env.sh
+source "$SCHED_ROOT/../lib/herdr-env.sh"
+HERDR="${HERDR_BIN:-$HERDR_DEFAULT_BIN}"   # 上の PATH で /opt/homebrew/bin/herdr が先に見つかる
 export HERDR_BIN_PATH="${HERDR_BIN_PATH:-$HERDR}"
 
 die() { echo "error: $*" >&2; exit 2; }
