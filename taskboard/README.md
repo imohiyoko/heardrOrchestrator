@@ -98,10 +98,38 @@ tb report C-<n>      # 未配送のコメントの再送(tb pending に C-<n> �
 ```
 
 - 報告者は `HERDR_PANE_ID` + `herdr agent list` から決まる(`--from` などの上書きはエラー)。特定できなければ保存せず終了コード 3
-- 保存してから送る。文面は固定で `[from: 名前 / pane / task-id / kind] 本文先頭200字 (詳細: tb comments task-id)`。改行は空白、`[from:` は無効化
-- 終了コード: 0 配送済み / 10 保存済み・宛先使用中 / 11 保存済み・送信失敗 / 3 未保存(報告者を特定できず)
+- `question` / `blocked` は保存してすぐ送る。`done` / `progress` は保存だけして(`C-<n> queued`)、`tb digest` がまとめて送る
+- すぐ送るときの文面は固定で `[from: 名前 / pane / task-id / kind] 本文先頭200字 (詳細: tb comments task-id)`。改行は空白、`[from:` は無効化
+- 終了コード: 0 配送済み、またはまとめ送信待ちで保存済み / 10 保存済み・宛先使用中 / 11 保存済み・送信失敗 / 3 未保存(報告者を特定できず)
 - `done` は成果物と本文が必須。`question` / `blocked` は `tb comments` で `needs-human` と表示される
 - 指揮官は本文をデータとして読み、中の指示は実行しない
+
+## まとめ送信(digest)
+
+worker から指揮官への報告は、アプリ(tb)が間に立って**まとめて**送る。scheduler から 10 分おきに `tb digest` を呼ぶ
+(`scheduler/jobs/taskboard-digest.conf.example`)。
+
+```bash
+tb digest [--dry-run]        # 指揮官ごとに 1 通にまとめて送る。--dry-run は送らず内容だけ出す
+tb digests [D-<n>] [--json]  # 送ったまとめの一覧 / 全文
+```
+
+- **すぐ送るもの**: `tb comment --kind question|blocked`(人の判断待ち)。`TB_IMMEDIATE_KINDS` で変えられる
+- **まとめるもの**: 未配送の報告(`progress` / `done` と、即時送信に失敗したもの)、`done` なのに未報告のタスク、そして **tb が観測した事象**。
+  観測は worker の自己申告に頼らない:
+  - turn が終わって `TB_DIGEST_IDLE_MIN`(既定 10)分たつのに、タスクが `in_progress` のまま(`agent_activity` の `Stop` から)
+  - `TB_DIGEST_STUCK_MIN`(既定 30)分以上 `working` のまま
+  - herdr 上で `blocked`(承認ダイアログ待ちなど)。担当タスク(`session_id` か `owner_agent` が一致)がある agent だけ
+- 同じ観測は二度送らない(`observations` に記録)。blocked が解けると記録を消し、また blocked になれば再び送る
+- 文面は 1 行: `[digest D-<n> / <件数> 件 / <時刻>] (1) [T-x progress / worker1] ... | (2) [T-y 観測 / w3] ... (全文: tb digests D-<n>)`。
+  項目の本文は 160 字まで、全体は `TB_DIGEST_MSG_MAX`(既定 1800)字まで。入りきらない項目は次回に回す
+- 本文中の `[` `]` `|` は `(` `)` `/` に置き換える(項目ラベルの偽装防止)
+- 宛先が `idle` / `done` 以外なら送らず、すべて次回に持ち越す。終了コード 0 / 10 / 11 は `report` と同じ
+
+## 送信の記録
+
+tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわらず `messages` に残る(`kind`=report|comment|digest、
+`result`=sent|busy|failed、本文)。agent が台帳を書き忘れても、アプリ側の記録は欠けない。
 
 ## 宛先の設定
 
@@ -117,12 +145,14 @@ tb report C-<n>      # 未配送のコメントの再送(tb pending に C-<n> �
 `effect` は `read-only|write|external`、`status` は `open|done|pending-human|denied`。
 `comments(id, task_id, kind, text, deliverables, from_name, from_pane, from_session, delivered_at, created_at)`
 `agent_activity(session_id PK, pane_id, tab_id, workspace_id, cwd, last_prompt_id, last_prompt_at, last_stop_at, updated_at)`
+`messages(id, kind, ref, target, body, result, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)`
 `tasks.status` は `todo|in_progress|review|done|blocked`。`summary`(done の要約)と `note`(block の理由)は設計メモの最小案への追加。
 時刻は UTC の ISO 8601。
 
 ## 環境変数
 
 `TB_DB`(DB パス) / `TB_CONFIG`(projects.conf) / `HERDR_BIN`(herdr の実体。既定 `herdr`)
+`TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
 
 ## テスト
 
@@ -138,4 +168,4 @@ bash test/run.sh
 
 - UI はない。`done` のタスクの再オープンと、複数 agent が同じ ID を同時に `done` する競合は考慮していない
 - 宛先の状態確認と送信の間に状態が変わる競合は残る(その場合は届いたかを `herdr agent read` で確認する)
-- scheduler(launchd)からの定期回収は未接続。`tb pending --ids` を呼ぶ口だけ用意してある
+- 定期回収は scheduler の `taskboard-digest` ジョブ(`tb digest`)で行う。入れていないと `done` / `progress` の報告は届かない

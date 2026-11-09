@@ -1,0 +1,11 @@
+# worker → 指揮官の報告を 10 分おきにまとめて送る(tb digest)。agent を介さず決定論的に実行。
+# まとめるもの: 未配送の報告(progress/done)、未報告の done、tb が観測した事象(turn 終了後も in_progress /
+# 長時間 working / blocked)。question/blocked の報告は tb comment の時点ですぐ送られる。
+# 宛先が working なら送らずに次の回へ持ち越す。taskboard-pending.conf と併用しなくてよい(digest が回収する)。
+# 注意: COMMAND は bash -c でそのまま実行される。このファイルは人が管理し、外部入力を埋め込まない。
+COMMAND='cd /path/to/taskboard && bin/tb digest'
+COMMAND_TIMEOUT=60
+WINDOW=00:00-23:59
+INTERVAL_MIN=10
+DAYS=daily
+TZ=Asia/Tokyo
