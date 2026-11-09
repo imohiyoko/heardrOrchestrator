@@ -181,6 +181,21 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.herdr-webui.plist
 | `WEBUI_TB_DB` | `TB_DB`、無ければ `taskboard/data/tasks.db` | tb と同じ DB(既定は `lib/herdr_env.py`) |
 | `WEBUI_SCHED_LOGS` / `WEBUI_SCHED_JOBS` / `WEBUI_SCHED_SETTINGS` / `WEBUI_DISPATCH` / `WEBUI_RUN_DIR` | 兄弟ディレクトリ / `webui/run` | データ源・settings・`run/` の場所 |
 
+## コードの構成
+
+`server.py` は入口だけで、中身は `app/` にある。依存は上から下への一方向(逆向きの import はしない)。
+
+| ファイル | 中身 |
+|---|---|
+| `app/config.py` | 定数と、環境変数で上書きできるパス(DB と herdr の既定は `lib/herdr_env.py`) |
+| `app/sanitize.py` | 外部由来の文字列の無害化(`e()` を通してから HTML に出す) |
+| `app/herdr.py` | herdr CLI の呼び出し(読むだけ)と短いキャッシュ |
+| `app/data.py` | tasks.db とログの読み取り(読み取り専用の接続)、緊急通知の集計 |
+| `app/jobs.py` | scheduler のジョブ定義と、Web UI から書く上書き設定 |
+| `app/views.py` | HTML の組み立てと各ページ |
+| `app/handler.py` | HTTP ハンドラ・ログイン・起動 |
+| `auth.py` | パスワードとセッション |
+
 ## テスト
 
 ```bash
