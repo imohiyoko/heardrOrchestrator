@@ -1,0 +1,10 @@
+# 会計役(roles/auditor.md)に 1 時間おきにレビューを依頼する。間隔は Web UI の定期実行画面から変えられる。
+# 会計役は tb review-pack を読み、設定役(人事)に tb proposal で改善提案を送る。
+TARGET=auditor
+# 先頭を / にしないこと(スラッシュコマンドと解釈される)
+PROMPT='roles/auditor.md の手順でレビューしてください(tb review-pack --mark から)。'
+WINDOW=09:00-21:00
+INTERVAL_MIN=60
+DAYS=daily
+SKIP_IF="working blocked"
+TZ=Asia/Tokyo
