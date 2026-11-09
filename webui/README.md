@@ -75,7 +75,7 @@ rm webui/run/auth.json webui/run/sessions.json
 - `sessions.json`: セッション値の SHA-256 と有効期限だけ。Cookie の値そのものは保存しない。
 - Cookie は `HttpOnly; SameSite=Strict; Path=/`。
 
-POST を受け付けるのは `/login`・`/setup`・`/logout`・`/reset` と `/jobs/<job>` だけ(`/jobs/<job>` はログイン中のセッションに結びついたトークンが必要)。これらは `Origin`/`Referer` が自分のオリジン
+POST を受け付けるのは `/login`・`/setup`・`/logout`・`/reset`・`/jobs/<job>`・`/resolve` だけ(`/jobs/<job>` と `/resolve` はログイン中のセッションに結びついたトークンが必要)。これらは `Origin`/`Referer` が自分のオリジン
 (`127.0.0.1:<port>`)であることと、フォームの隠しトークン(署名付き・30 分で失効)を確認する。それ以外の
 POST/PUT/DELETE/PATCH は 405。
 
