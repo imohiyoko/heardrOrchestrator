@@ -293,7 +293,7 @@ def page(title, body, path, badge, logout=""):
         "<!doctype html><html lang=ja><head><meta charset=utf-8>"
         f'<meta http-equiv="refresh" content="{REFRESH_SEC}">'
         '<meta name=viewport content="width=device-width,initial-scale=1">'
-        '<meta name=referrer content=no-referrer>'
+        '<meta name=referrer content=same-origin>'
         f"<title>{e(title)} - herdr</title><style>{CSS}</style></head><body>"
         f"<nav>{''.join(links)}{logout}</nav><main><h1>{e(title)}</h1>{body}"
         f'<p class=note>自動更新 {REFRESH_SEC} 秒 / 読み取り専用 / 機密を含みうる画面です</p></main></body></html>'
@@ -583,7 +583,7 @@ def route(path, qs):
 
 def plain_page(title, body):
     """ログイン・初回設定用(ナビも自動更新もなし)。"""
-    return ("<!doctype html><html lang=ja><head><meta charset=utf-8><meta name=referrer content=no-referrer>"
+    return ("<!doctype html><html lang=ja><head><meta charset=utf-8><meta name=referrer content=same-origin>"
             '<meta name=viewport content="width=device-width,initial-scale=1">'
             f"<title>{e(title)} - herdr</title><style>{CSS}</style></head><body>"
             f"<main style='max-width:420px'><h1>{e(title)}</h1>{body}</main></body></html>")
@@ -641,7 +641,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", "same-origin")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy",

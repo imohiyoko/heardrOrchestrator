@@ -566,6 +566,77 @@ for name, prep in (("nodb", None), ("baddb", lambda e_: open(e_["WEBUI_TB_DB"], 
             check("DB 不在の表示", "タスク DB がありません" in c.get("/tasks")[2])
     stop(p)
 
+# ================= ブラウザ相当の Origin(Referrer-Policy 起因の不具合の回帰)
+# Referrer-Policy: no-referrer だと、ブラウザは同一オリジンの POST でも Origin: null にし Referer も付けない。
+# → 全フォームが 403 になった。同一オリジンには Origin/Referer を付ける same-origin にする。
+base = free_range(1)
+env, d = make_env("origin0", HERDR_WEBUI_RANGE=f"{base}-{base}")
+p = start(env)
+port = wait_port(env, p)
+c0 = Client(port)
+r = c0.get("/setup")
+check("Referrer-Policy は same-origin(no-referrer ではない)", r[1].get("Referrer-Policy") == "same-origin", r[1].get("Referrer-Policy"))
+r = c0.get("/setup")
+check("/setup の Referrer-Policy ヘッダ", r[1].get("Referrer-Policy") == "same-origin")
+check("/setup の meta referrer も same-origin", "name=referrer content=same-origin" in r[2] and "no-referrer" not in r[2])
+stop(p)
+
+BAD = [("null", "Origin: null"), ("http://evil.example", "外部オリジン"), (None, "Origin も Referer も無い")]
+for host in ("127.0.0.1", "localhost"):
+    base = free_range(1)
+    env, d = make_env("origin-" + host, HERDR_WEBUI_RANGE=f"{base}-{base}")
+    RUN_ = env["WEBUI_RUN_DIR"]
+    p = start(env)
+    port = wait_port(env, p)
+    good = f"http://{host}:{port}"
+    c = Client(port)
+    H = f"{host}:{port}"
+    pw1, pw2 = "origin-test-password-1", "origin-test-password-2"
+
+    def post(path, data, origin, cookie="default"):
+        return c.raw("POST", path, data, origin=origin, cookie=cookie, host=H)
+
+    def tok(path, cookie="default"):
+        m = re.search(r'name=csrf value="([^"]+)"', c.raw("GET", path, host=H, cookie=cookie)[2])
+        return m.group(1) if m else ""
+
+    # /setup: 不正な Origin は 403、正しい Origin は成功
+    for o, label in BAD:
+        r = post("/setup", {"csrf": tok("/setup"), "username": "u", "password": pw1, "confirm": pw1}, o)
+        check(f"[{host}] /setup: {label} は 403", r[0] == 403, str(r[0]))
+    check(f"[{host}] 拒否の間は auth.json が作られない", not os.path.exists(os.path.join(RUN_, "auth.json")))
+    r = post("/setup", {"csrf": tok("/setup"), "username": "u", "password": pw1, "confirm": pw1}, good)
+    check(f"[{host}] /setup: Origin {good} で成功", r[0] == 302 and "Set-Cookie" in r[1], str(r[:2]))
+    ck = re.match(r"([^;]+)", r[1]["Set-Cookie"]).group(1)
+
+    # /logout
+    for o, label in BAD:
+        r = post("/logout", {"csrf": tok("/", ck)}, o, ck)
+        check(f"[{host}] /logout: {label} は 403(セッションは残る)", r[0] == 403 and c.raw("GET", "/inbox", cookie=ck, host=H)[0] == 200, str(r[0]))
+    r = post("/logout", {"csrf": tok("/", ck)}, good, ck)
+    check(f"[{host}] /logout: Origin {good} で成功", r[0] == 302 and r[1]["Location"] == "/login", str(r[:2]))
+
+    # /login
+    for o, label in BAD:
+        r = post("/login", {"csrf": tok("/login"), "username": "u", "password": pw1}, o)
+        check(f"[{host}] /login: {label} は 403", r[0] == 403 and "Set-Cookie" not in r[1], str(r[0]))
+    r = post("/login", {"csrf": tok("/login"), "username": "u", "password": pw1}, good)
+    check(f"[{host}] /login: Origin {good} で成功", r[0] == 302 and "Set-Cookie" in r[1], str(r[:2]))
+    ck = re.match(r"([^;]+)", r[1]["Set-Cookie"]).group(1)
+
+    # /reset
+    allow = os.path.join(os.path.abspath(RUN_), "allow-reset")
+    open(allow, "w").close()
+    for o, label in BAD:
+        r = post("/reset", {"csrf": tok("/login"), "password": pw2, "confirm": pw2}, o)
+        check(f"[{host}] /reset: {label} は 403(許可は残る)", r[0] == 403 and os.path.exists(allow), str(r[0]))
+    r = post("/reset", {"csrf": tok("/login"), "password": pw2, "confirm": pw2}, good)
+    check(f"[{host}] /reset: Origin {good} で成功", r[0] == 302 and r[1]["Location"] == "/login" and not os.path.exists(allow), str(r[:2]))
+    # 成功後も、Origin も Referer も無い POST は 403 のまま
+    r = c.raw("POST", "/login", {"csrf": tok("/login"), "username": "u", "password": pw2}, origin=None, host=H)
+    check(f"[{host}] Origin も Referer も無い /login は 403(成功後も)", r[0] == 403)
+    stop(p)
+
 print()
 print("FAILED: " + ", ".join(fails) if fails else "all passed")
 sys.exit(1 if fails else 0)
