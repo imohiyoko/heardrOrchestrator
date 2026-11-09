@@ -17,5 +17,12 @@ case "$1 $2" in
     printf 'prompt %s\t%s\n' "$3" "$4" >>"${FAKE_LOG:?}"
     if [[ ${FAKE_PROMPT_RC:-0} != 0 ]]; then echo '{"error":{"code":"x"}}'; exit "$FAKE_PROMPT_RC"; fi
     echo '{"result":{"type":"ok"}}';;
+  "workspace create")
+    echo "workspace-create $*" >>"${FAKE_LOG:?}"
+    [[ ${FAKE_WS_FAIL:-0} == 1 ]] && { echo '{"error":{"code":"x"}}'; exit 1; }
+    echo '{"result":{"root_pane":{"pane_id":"wA:p1"}}}';;
+  "agent start")
+    printf 'start %s\n' "$3" >>"${FAKE_LOG:?}"
+    exit "${FAKE_START_RC:-0}";;
   *) echo "fake-herdr: unsupported: $*" >&2; exit 99;;
 esac

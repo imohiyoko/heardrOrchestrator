@@ -302,6 +302,17 @@ def urgent_items():
                           "title": _short(f"{r['task_id']} {r.get('effect') or ''}", 80),
                           "body": _short(f"{r['cmd']} / 理由: {r['why']}"),
                           "href": "/tasks/" + quote(str(r["task_id"]), safe=""), "ts": clean(r.get("updated_at") or "")})
+        for al in q("SELECT * FROM alerts WHERE status='analyzed' AND severity IN ('critical','high') ORDER BY id DESC LIMIT 50"):
+            items.append({"id": f"r:{al['id']}:{clean(al.get('analyzed_at'))}", "kind": "alert_result",
+                          "label": f"アラート解析結果({clean(al['severity'])})",
+                          "title": _short(f"A-{al['id']} {al['title']}", 80),
+                          "body": _short(f"{al.get('result_summary') or ''} / 全文: tb alerts A-{al['id']}(対応後に tb alert-close A-{al['id']})"),
+                          "href": "/notifications", "ts": clean(al.get("analyzed_at") or "")})
+        for al in q("SELECT * FROM alerts WHERE status='awaiting-approval' ORDER BY id DESC LIMIT 50"):
+            items.append({"id": f"w:{al['id']}", "kind": "alert_approval", "label": "アラート(解析役の起動待ち)",
+                          "title": _short(f"A-{al['id']} {al['title']}", 80),
+                          "body": _short(f"{al.get('body') or ''} / 手元で tb alert-approve A-{al['id']}(今後も自動なら --always)"),
+                          "href": "/notifications", "ts": clean(al.get("last_seen") or "")})
         for o in q("SELECT * FROM outbox WHERE status='pending' ORDER BY id DESC LIMIT 100"):
             items.append({"id": f"o:{o['id']}", "kind": "send_pending", "label": "送信の承認待ち",
                           "title": _short(f"O-{o['id']} {o['from_name']} → {o['target']} ({o['kind']})", 80),
