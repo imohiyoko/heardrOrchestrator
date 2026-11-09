@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tb — herdr agent 用の最小タスク表(SQLite 1 ファイル)
-# usage: tb {add|list|show|claim|update|done|block|report|pending|proxy-*|touch|activity|comment|comments} ...  (tb help で詳細)
+# usage: tb {add|list|show|claim|update|done|block|report|pending|proxy-*|touch|activity|comment|comments|digest|digests} ...  (tb help で詳細)
 #
 # 環境変数: TB_DB(DB パス) / TB_CONFIG(projects.conf) / HERDR_BIN(herdr の実体。テストでは疑似 herdr)
 # 終了コード: 0 成功 / 1 エラー / 2 使い方の誤り
@@ -83,6 +83,30 @@ init_db() {
     last_prompt_at TEXT,    -- UserPromptSubmit の時刻(UTC, ミリ秒)
     last_stop_at   TEXT,    -- Stop の時刻
     updated_at     TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS messages (       -- tb が送ろうとしたものすべて(送れたか否かも)
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,                  -- report|comment|digest
+    ref        TEXT,                           -- T-.. / C-.. / D-..
+    target     TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    result     TEXT NOT NULL CHECK (result IN ('sent','busy','failed')),
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS digests (        -- まとめ送信 1 通ごと。body は複数行の全文
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    target     TEXT NOT NULL,
+    item_count INTEGER NOT NULL,
+    body       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS observations (   -- tb が観測して送った事象(同じものを二度送らない)
+    key        TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,                  -- idle|stuck|blocked
+    task_id    TEXT,
+    text       TEXT NOT NULL,
+    digest_id  INTEGER,
+    created_at TEXT NOT NULL
   );" >/dev/null
 }
 
@@ -264,19 +288,29 @@ cmd_block() {
 
 # ---------- report ----------
 # 宛先の状態を見て、idle/done のときだけ送る。0=送信済み 10=宛先が使用中 11=状態取得/送信の失敗
-herdr_send() {  # $1=宛先 $2=本文 $3=ログ用 ID
-  local target=$1 msg=$2 id=$3 st out
+herdr_send() {  # $1=宛先 $2=本文 $3=ログ用 ID [$4=種別(report|comment|digest)]
+  local target=$1 msg=$2 id=$3 kind=${4:-report} st out
   st=$("$HERDR_BIN" agent get "$target" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null) || st=""
   case $st in
     idle|done) ;;
-    "") echo "tb: 宛先 '$target' の状態を取得できません。未送信(pending に残す): $id" >&2; return 11;;
-    *)  echo "tb: 宛先 '$target' が $st のため送りません。未送信(pending に残す): $id" >&2; return 10;;
+    "") log_message "$kind" "$id" "$target" "$msg" failed
+        echo "tb: 宛先 '$target' の状態を取得できません。未送信(pending に残す): $id" >&2; return 11;;
+    *)  log_message "$kind" "$id" "$target" "$msg" busy
+        echo "tb: 宛先 '$target' が $st のため送りません。未送信(pending に残す): $id" >&2; return 10;;
   esac
   if ! out=$("$HERDR_BIN" agent prompt "$target" "$msg" 2>&1) || jq -e 'type=="object" and has("error")' <<<"$out" >/dev/null 2>&1; then
+    log_message "$kind" "$id" "$target" "$msg" failed
     echo "tb: 送信に失敗しました。未送信(pending に残す): $id" >&2
     echo "$out" >&2
     return 11
   fi
+  log_message "$kind" "$id" "$target" "$msg" sent
+}
+
+# 送信の記録はアプリ(tb)が書く。agent の自己申告に頼らない
+log_message() {  # $1=kind $2=ref $3=target $4=body $5=sent|busy|failed
+  sql "INSERT INTO messages (kind, ref, target, body, result, created_at)
+    VALUES ($(q "$1"), $(q "$2"), $(q "$3"), $(q "$4"), $(q "$5"), $(q "$(now)"));" >/dev/null || true
 }
 
 cmd_report() {
@@ -557,6 +591,8 @@ cmd_activity() {
 
 # ---------- comment / comments(worker → 指揮官の報告コメント) ----------
 COMMENT_KINDS="done progress question blocked"
+# すぐ送る kind。それ以外は保存だけして tb digest でまとめて送る
+IMMEDIATE_KINDS=${TB_IMMEDIATE_KINDS:-question blocked}
 LABEL_NAME=""; LABEL_PANE=""; LABEL_SESSION=""
 
 # 報告者ラベルは herdr から引く(自己申告にしない)。引けなければ 1 を返す(理由は stderr)
@@ -590,7 +626,7 @@ deliver_comment() {  # $1=comments.id → 0 送信済み / 10 / 11
   name=$(jq -r .from_name <<<"$row"); pane=$(jq -r .from_pane <<<"$row")
   project=$(sql "SELECT project FROM tasks WHERE id=$(q "$tid");"); target=$(target_for "$project")
   msg="[from: $name / $pane / $tid / $kind] $(oneline "$text" 200) (詳細: tb comments $tid)"
-  herdr_send "$target" "$msg" "C-$cid" || return $?
+  herdr_send "$target" "$msg" "C-$cid" comment || return $?
   sql "UPDATE comments SET delivered_at=$(q "$(now)") WHERE id=$cid;"
   echo "C-$cid delivered to $target"
 }
@@ -623,9 +659,13 @@ cmd_comment() {
   cid=$(sql "INSERT INTO comments (task_id, kind, text, deliverables, from_name, from_pane, from_session, created_at)
     VALUES ($(q "$tid"), $(q "$kind"), $(q "$text"), $(q "$darr"), $(q "$LABEL_NAME"), $(q "$LABEL_PANE"), $(q "$LABEL_SESSION"), $(q "$(now)"));
     SELECT last_insert_rowid();")
-  deliver_comment "$cid" >/dev/null || rc=$?   # 保存は済んでいる。配送の結果は終了コードで返す
+  local state=queued
+  if [[ " $IMMEDIATE_KINDS " == *" $kind "* ]]; then   # 人の判断待ちはすぐ送る。それ以外は tb digest でまとめて送る
+    deliver_comment "$cid" >/dev/null || rc=$?   # 保存は済んでいる。配送の結果は終了コードで返す
+    state=$([[ $rc == 0 ]] && echo delivered || echo saved-undelivered)
+  fi
   if ((json)); then sql -json "SELECT * FROM comments WHERE id=$cid;" | jq -c '.[0] | .deliverables |= fromjson | .id = "C-\(.id)"'
-  else echo "C-$cid $([[ $rc == 0 ]] && echo delivered || echo saved-undelivered)"; fi
+  else echo "C-$cid $state"; fi
   return $rc
 }
 
@@ -650,6 +690,170 @@ cmd_comments() {
     sql -separator $'\t' "SELECT 'C-'||id, kind, CASE WHEN kind IN ('question','blocked') THEN 'needs-human' ELSE '-' END,
       CASE WHEN delivered_at IS NULL THEN 'undelivered' ELSE 'delivered' END, task_id, from_name,
       replace(replace(text, char(10), ' '), char(9), ' ') FROM comments WHERE $where ORDER BY id;"
+  fi
+}
+
+# ---------- digest(worker → 指揮官のまとめ送信。scheduler から 10 分おきに呼ぶ想定) ----------
+# 未配送の報告・未報告の done・tb が観測した事象を、指揮官ごとに 1 通にまとめて送る。
+# 観測は worker の自己申告に頼らない: turn が終わったのに in_progress のまま / 長時間 working / blocked(承認待ち)
+DIGEST_IDLE_MIN=${TB_DIGEST_IDLE_MIN:-10}
+DIGEST_STUCK_MIN=${TB_DIGEST_STUCK_MIN:-30}
+DIGEST_ITEM_MAX=${TB_DIGEST_ITEM_MAX:-160}
+DIGEST_MSG_MAX=${TB_DIGEST_MSG_MAX:-1800}
+
+# 項目の本文: 1 行化(oneline)に加え、項目の区切り(|)と角かっこラベルを無効化する
+item_text() { oneline "$1" "$2" | tr '[]|' '()/'; }
+
+DIGEST_ITEMS=""
+add_item() {  # $1=target $2=type(comment|task|obs) $3=ref $4=key $5=task_id $6=obs_kind $7=label $8=本文
+  DIGEST_ITEMS+=$(jq -nc --arg target "$1" --arg type "$2" --arg ref "$3" --arg key "$4" --arg task "$5" \
+    --arg okind "$6" --arg short "[$7] $(item_text "$8" "$DIGEST_ITEM_MAX")" --arg full "[$7] $(item_text "$8" 2000)" \
+    '{target:$target,type:$type,ref:$ref,key:$key,task:$task,okind:$okind,short:$short,full:$full}')$'\n'
+}
+obs_seen() { [[ -n $(sql "SELECT 1 FROM observations WHERE key=$(q "$1");") ]]; }
+
+collect_digest() {
+  local r tid kind from text dels project id owner summary key m pane sess name list task
+  # 1. 未配送の報告コメント(kind を問わない。即時送信に失敗したものもここで回収)
+  while IFS= read -r r; do
+    [[ -n $r ]] || continue
+    id=$(jq -r .id <<<"$r"); tid=$(jq -r .task_id <<<"$r"); kind=$(jq -r .kind <<<"$r")
+    from=$(jq -r .from_name <<<"$r"); text=$(jq -r .text <<<"$r"); project=$(jq -r '.project // ""' <<<"$r")
+    dels=$(jq -r '.deliverables | fromjson | join(", ")' <<<"$r")
+    [[ -n $dels ]] && text+=" / 成果物: $dels"
+    add_item "$(target_for "$project")" comment "C-$id" "" "$tid" "" "$tid $kind / $from" "$text"
+  done < <(sql -json "SELECT c.*, t.project FROM comments c LEFT JOIN tasks t ON t.id=c.task_id
+             WHERE c.delivered_at IS NULL ORDER BY c.id;" | jq -c '(. // [])[]')
+  # 2. done なのに未報告のタスク
+  while IFS= read -r r; do
+    [[ -n $r ]] || continue
+    id=$(jq -r .id <<<"$r"); project=$(jq -r .project <<<"$r"); owner=$(jq -r '.owner_agent // "-"' <<<"$r")
+    summary=$(jq -r '.summary // ""' <<<"$r"); dels=$(jq -r '.deliverables | fromjson | join(", ")' <<<"$r")
+    add_item "$(target_for "$project")" task "$id" "" "$id" "" "$id done / $owner" "$summary / 成果物: $dels"
+  done < <(sql -json "SELECT * FROM tasks WHERE status='done' AND (reported_at IS NULL OR reported_at='') ORDER BY updated_at, id;" | jq -c '(. // [])[]')
+  # 3. 観測: turn が終わって DIGEST_IDLE_MIN 分たつのに in_progress のまま(done も報告もない)
+  while IFS=$'\t' read -r id project owner key m; do
+    [[ -n $id ]] || continue
+    obs_seen "$key" && continue
+    add_item "$(target_for "$project")" obs "$id" "$key" "$id" idle "$id 観測 / $owner" \
+      "turn が終わって $m 分たつが、タスクは in_progress のまま(done・報告なし)"
+  done < <(sql -separator $'\t' "SELECT t.id, t.project, COALESCE(t.owner_agent,'-'), 'idle:'||t.id||':'||a.last_stop_at,
+             CAST((julianday('now') - julianday(a.last_stop_at)) * 1440 AS INTEGER)
+             FROM tasks t JOIN agent_activity a ON a.session_id=t.session_id
+             WHERE t.status='in_progress' AND a.last_stop_at IS NOT NULL
+               AND (a.last_prompt_at IS NULL OR a.last_prompt_at <= a.last_stop_at)
+               AND (julianday('now') - julianday(a.last_stop_at)) * 1440 >= $DIGEST_IDLE_MIN ORDER BY t.id;")
+  # 4. 観測: DIGEST_STUCK_MIN 分以上 working のまま
+  while IFS=$'\t' read -r id project owner key m; do
+    [[ -n $id ]] || continue
+    obs_seen "$key" && continue
+    add_item "$(target_for "$project")" obs "$id" "$key" "$id" stuck "$id 観測 / $owner" \
+      "$m 分 working のまま(長い作業か停止かは区別できない)"
+  done < <(sql -separator $'\t' "SELECT t.id, t.project, COALESCE(t.owner_agent,'-'), 'stuck:'||a.session_id||':'||a.last_prompt_at,
+             CAST((julianday('now') - julianday(a.last_prompt_at)) * 1440 AS INTEGER)
+             FROM tasks t JOIN agent_activity a ON a.session_id=t.session_id
+             WHERE t.status IN ('in_progress','review','blocked') AND a.last_prompt_at IS NOT NULL
+               AND (a.last_stop_at IS NULL OR a.last_prompt_at > a.last_stop_at)
+               AND (julianday('now') - julianday(a.last_prompt_at)) * 1440 >= $DIGEST_STUCK_MIN ORDER BY t.id;")
+  # 5. 観測: herdr 上で blocked(承認ダイアログ待ちなど)の agent。担当タスクがあるものだけ
+  if list=$("$HERDR_BIN" agent list 2>/dev/null) && jq -e '.result.agents' <<<"$list" >/dev/null 2>&1; then
+    local current=""
+    while IFS=$'\t' read -r pane name sess; do
+      [[ -n $pane ]] || continue
+      key="blocked:$pane:$sess"; current+="$(q "$key"),"
+      obs_seen "$key" && continue
+      task=$(sql -separator $'\t' "SELECT id, project FROM tasks WHERE status!='done'
+               AND ((session_id IS NOT NULL AND session_id=$(q "$sess")) OR (owner_agent IS NOT NULL AND owner_agent=$(q "$name")))
+               ORDER BY updated_at DESC LIMIT 1;")
+      [[ -n $task ]] || continue
+      id=${task%%$'\t'*}; project=${task#*$'\t'}
+      add_item "$(target_for "$project")" obs "$id" "$key" "$id" blocked "$id 観測 / ${name:-$pane}" \
+        "blocked のまま(承認ダイアログ待ちの可能性。herdr agent attach ${name:-$pane} で確認)"
+    done < <(jq -r '.result.agents[] | select(.agent_status=="blocked") | [.pane_id, (.name // ""), (.agent_session.value // "")] | @tsv' <<<"$list")
+    # blocked でなくなった agent の記録は消す(再び blocked になったら、また送る)
+    sql "DELETE FROM observations WHERE kind='blocked' AND key NOT IN (${current}'');"
+  fi
+}
+
+# 1 通分の本文を組み立てる。長さの上限に収まる項目だけを入れ、残りは次回に回す
+# stdout: 1 行目=入れた項目数、2 行目=送る本文(1 行)
+build_digest() {  # $1=target の項目(JSON 行) $2=digest ID
+  local items=$1 did=$2 total n=0 body tail line acc=""   # 80 = 見出し・「残り N 件」の分
+  total=$(grep -c . <<<"$items")
+  while IFS= read -r line; do
+    local s; s=$(jq -r .short <<<"$line")
+    tail=" (全文: tb digests D-$did)"
+    local cand="${acc:+$acc | }($((n+1))) $s"
+    if (( n > 0 && ${#cand} + ${#tail} + 80 > DIGEST_MSG_MAX )); then break; fi
+    acc=$cand; n=$((n+1))
+  done <<<"$items"
+  body="[digest D-$did / $n 件 / $(now)] $acc"
+  (( n < total )) && body+=" (残り $((total-n)) 件は次回)"
+  body+=" (全文: tb digests D-$did)"
+  printf '%s\n%s\n' "$n" "$body"
+}
+
+cmd_digest() {
+  local dry=0
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --dry-run) dry=1; shift;;
+      *) usage "digest: 不明な引数 $1";;
+    esac
+  done
+  [[ $DIGEST_IDLE_MIN =~ ^[0-9]+$ && $DIGEST_STUCK_MIN =~ ^[0-9]+$ ]] || usage "TB_DIGEST_IDLE_MIN / TB_DIGEST_STUCK_MIN は数字"
+  DIGEST_ITEMS=""
+  collect_digest
+  [[ -n $DIGEST_ITEMS ]] || { echo "digest: 送るものはありません"; return 0; }
+  local rc=0 target items did out n body full sel
+  while IFS= read -r target; do
+    items=$(jq -c --arg t "$target" 'select(.target==$t)' <<<"$DIGEST_ITEMS")
+    if ((dry)); then
+      out=$(build_digest "$items" "?"); printf '%s\t%s\n' "$target" "$(sed -n 2p <<<"$out")"; continue
+    fi
+    did=$(sql "INSERT INTO digests (target, item_count, body, created_at) VALUES ($(q "$target"), 0, '', $(q "$(now)")); SELECT last_insert_rowid();")
+    out=$(build_digest "$items" "$did"); n=$(sed -n 1p <<<"$out"); body=$(sed -n 2p <<<"$out")
+    sel=$(head -n "$n" <<<"$items")
+    if herdr_send "$target" "$body" "D-$did" digest; then
+      full=$(jq -r .full <<<"$sel")
+      sql "UPDATE digests SET item_count=$n, body=$(q "$full") WHERE id=$did;"
+      local ts; ts=$(now)
+      while IFS= read -r r; do
+        local type ref; type=$(jq -r .type <<<"$r"); ref=$(jq -r .ref <<<"$r")
+        case $type in
+          comment) sql "UPDATE comments SET delivered_at=$(q "$ts") WHERE id=${ref#C-} AND delivered_at IS NULL;";;
+          task)    sql "UPDATE tasks SET reported_at=$(q "$ts"), updated_at=$(q "$ts") WHERE id=$(q "$ref") AND reported_at IS NULL;";;
+          obs)     sql "INSERT OR IGNORE INTO observations (key, kind, task_id, text, digest_id, created_at)
+                        VALUES ($(q "$(jq -r .key <<<"$r")"), $(q "$(jq -r .okind <<<"$r")"), $(q "$ref"), $(q "$(jq -r .full <<<"$r")"), $did, $(q "$ts"));";;
+        esac
+      done <<<"$sel"
+      echo "D-$did sent to $target ($n 件)"
+    else
+      local e=$?
+      sql "DELETE FROM digests WHERE id=$did;"   # 送れなかった回は残さない(messages には残る)。項目は次回に持ち越す
+      (( e > rc )) && rc=$e
+    fi
+  done < <(jq -r .target <<<"$DIGEST_ITEMS" | awk '!seen[$0]++')
+  return $rc
+}
+
+cmd_digests() {
+  local did="" json=0
+  if [[ ${1:-} == D-* ]]; then did=${1#D-}; shift; [[ $did =~ ^[0-9]+$ ]] || usage "digest ID は D-<数字>"; fi
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --json) json=1; shift;;
+      *) usage "digests: 不明な引数 $1";;
+    esac
+  done
+  if [[ -n $did ]]; then
+    local row; row=$(sql -json "SELECT * FROM digests WHERE id=$did;" | jq -c '.[0] // empty')
+    [[ -n $row ]] || die "digest が見つかりません: D-$did"
+    if ((json)); then jq -c '.id = "D-\(.id)"' <<<"$row"; else jq -r '"D-\(.id) → \(.target) (\(.item_count) 件, \(.created_at))\n\(.body)"' <<<"$row"; fi
+  elif ((json)); then
+    sql -json "SELECT * FROM digests ORDER BY id DESC LIMIT 50;" | jq -c '(. // [])[] | .id = "D-\(.id)"'
+  else
+    sql -separator $'\t' "SELECT 'D-'||id, target, item_count, created_at FROM digests ORDER BY id DESC LIMIT 50;"
   fi
 }
 
@@ -682,6 +886,12 @@ tb comment <task-id> --kind done|progress|question|blocked --text T [--deliverab
          保存してから送る。終了コード 0=配送済み 10=保存済み・宛先使用中 11=保存済み・送信失敗 3=報告者を特定できず未保存
 tb comments [<task-id>] [--kind K] [--undelivered] [--json]
          未配送は tb pending に C-<n> として出る。tb report C-<n> で再送
+         question/blocked はすぐ送る。done/progress は保存だけして tb digest でまとめて送る(TB_IMMEDIATE_KINDS で変更)
+
+まとめ送信(scheduler から 10 分おきに呼ぶ想定):
+tb digest [--dry-run]   未配送の報告・未報告の done・観測した事象(turn 終了後も in_progress / 長時間 working / blocked)を
+                        指揮官ごとに 1 通にまとめて送る。宛先が使用中なら送らず次回へ持ち越す。終了コード 0 / 10 / 11
+tb digests [D-<n>] [--json]   送ったまとめの一覧 / 全文
 USAGE
 }
 
@@ -691,7 +901,7 @@ main() {
     help|-h|--help) cmd_help; return 0;;
     touch) cmd_touch "$@"; return 0;;   # 常に 0。ツールの有無チェックや init_db の失敗でも止めない
     add|list|show|claim|update|done|block|report|pending|activity) ;;
-    proxy-request|proxy-list|proxy-resolve|proxy-check|comment|comments) ;;
+    proxy-request|proxy-list|proxy-resolve|proxy-check|comment|comments|digest|digests) ;;
     *) usage "不明なコマンド: $cmd";;
   esac
   need_tools

@@ -22,7 +22,7 @@ launchd が `bin/tick.sh <job>` を指定時刻に起動し、時間帯・曜日
 ### コマンド実行型ジョブ
 
 `TARGET` / `PROMPT` の代わりに `COMMAND='...'`(シェル 1 行)を書くと、agent を介さずそのコマンドを実行する
-(例: `jobs/taskboard-pending.conf.example`)。`WINDOW` / `DAYS` / `INTERVAL_MIN` の判定は同じ。終日は `WINDOW=00:00-23:59`。
+(例: `jobs/taskboard-digest.conf.example` — worker の報告を 10 分おきにまとめて指揮官へ送る)。`WINDOW` / `DAYS` / `INTERVAL_MIN` の判定は同じ。終日は `WINDOW=00:00-23:59`。
 
 - `TARGET` / `PROMPT` / `PROMPT_FILE` との同時指定はエラー。agent の状態は見ない。
 - `COMMAND_TIMEOUT`(秒、既定 60)を超えると子プロセスごと kill し、`failed`(exit 124)。
