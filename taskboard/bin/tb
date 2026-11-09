@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tb — herdr agent 用の最小タスク表(SQLite 1 ファイル)
-# usage: tb {add|list|show|claim|update|done|block|report|pending|proxy-*|touch|activity|comment|comments|digest|digests|send|flush|outbox} ...  (tb help で詳細)
+# usage: tb {add|list|show|claim|update|done|block|report|pending|proxy-*|touch|activity|comment|comments|digest|digests|send|flush|outbox|role-*|roles} ...  (tb help で詳細)
 #
 # 環境変数: TB_DB(DB パス) / TB_CONFIG(projects.conf) / HERDR_BIN(herdr の実体。テストでは疑似 herdr)
 # 終了コード: 0 成功 / 1 エラー / 2 使い方の誤り
@@ -86,7 +86,7 @@ init_db() {
   );
   CREATE TABLE IF NOT EXISTS messages (       -- tb が送ろうとしたものすべて(送れたか否かも)
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind       TEXT NOT NULL,                  -- report|comment|digest|send
+    kind       TEXT NOT NULL,                  -- report|comment|digest|send|role
     ref        TEXT,                           -- T-.. / C-.. / D-..
     target     TEXT NOT NULL,
     body       TEXT NOT NULL,
@@ -108,6 +108,17 @@ init_db() {
     created_at   TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS outbox_status ON outbox(status);
+  CREATE TABLE IF NOT EXISTS role_briefings ( -- 役割をいつ誰(どのセッション)にどの版で渡したか
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    role_file  TEXT,                           -- roles/ からの相対パス(共通のみなら NULL)
+    hash       TEXT NOT NULL,                  -- 渡した内容(_common + 役割)の SHA-256
+    source     TEXT NOT NULL,                  -- startup|resume|clear|compact|broadcast
+    via        TEXT NOT NULL CHECK (via IN ('hook','broadcast')),
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS role_briefings_session ON role_briefings(session_id);
   CREATE TABLE IF NOT EXISTS digests (        -- まとめ送信 1 通ごと。body は複数行の全文
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     target     TEXT NOT NULL,
@@ -773,7 +784,7 @@ collect_digest() {
   # 5. 観測: herdr 上で blocked(承認ダイアログ待ちなど)の agent。担当タスクがあるものだけ
   if list=$("$HERDR_BIN" agent list 2>/dev/null) && jq -e '.result.agents' <<<"$list" >/dev/null 2>&1; then
     local current=""
-    while IFS=$'\t' read -r pane name sess; do
+    while IFS=$'\x1f' read -r pane name sess; do
       [[ -n $pane ]] || continue
       key="blocked:$pane:$sess"; current+="$(q "$key"),"
       obs_seen "$key" && continue
@@ -784,7 +795,7 @@ collect_digest() {
       id=${task%%$'\t'*}; project=${task#*$'\t'}
       add_item "$(target_for "$project")" obs "$id" "$key" "$id" blocked "$id 観測 / ${name:-$pane}" \
         "blocked のまま(承認ダイアログ待ちの可能性。herdr agent attach ${name:-$pane} で確認)"
-    done < <(jq -r '.result.agents[] | select(.agent_status=="blocked") | [.pane_id, (.name // ""), (.agent_session.value // "")] | @tsv' <<<"$list")
+    done < <(jq -r '.result.agents[] | select(.agent_status=="blocked") | [.pane_id, (.name // ""), (.agent_session.value // "")] | map(tostring | gsub("[\u001f\n]"; " ")) | join("\u001f")' <<<"$list")
     # blocked でなくなった agent の記録は消す(再び blocked になったら、また送る)
     sql "DELETE FROM observations WHERE kind='blocked' AND key NOT IN (${current}'');"
   fi
@@ -1003,6 +1014,116 @@ cmd_outbox() {
   fi
 }
 
+# ---------- roles(agent ごとの役割の配布。SessionStart hook と一括送信) ----------
+ROLES_DIR=${TB_ROLES:-$TB_ROOT/../roles}
+ROLE_MAX=${TB_ROLE_MAX:-12000}
+ROLE_FILE=""; ROLE_HASH=""; ROLE_TEXT=""
+
+sha256() { if command -v sha256sum >/dev/null; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }
+
+role_file_for() {  # $1=agent 名 → 役割ファイルのパス(無ければ空)
+  local name=$1 k v pat
+  [[ $name =~ ^[A-Za-z0-9._-]{1,64}$ && $name != _* && $name != README ]] || return 0
+  if [[ -f $ROLES_DIR/$name.md ]]; then printf '%s' "$ROLES_DIR/$name.md"; return 0; fi
+  [[ -f $ROLES_DIR/map.conf ]] || return 0
+  while IFS='=' read -r k v || [[ -n $k ]]; do
+    pat=$(trim "${k%%#*}"); v=$(trim "${v%%#*}")
+    [[ -n $pat && -n $v && $v =~ ^[A-Za-z0-9._-]+$ ]] || continue
+    # shellcheck disable=SC2053  # glob として比べる
+    if [[ $name == $pat ]]; then
+      [[ -f $ROLES_DIR/$v.md ]] && printf '%s' "$ROLES_DIR/$v.md"
+      return 0
+    fi
+  done <"$ROLES_DIR/map.conf"
+}
+
+# ROLE_FILE / ROLE_HASH / ROLE_TEXT を埋める。渡すものが無ければ 1
+load_role() {  # $1=agent 名
+  local body=""
+  ROLE_FILE=$(role_file_for "$1"); ROLE_HASH=""; ROLE_TEXT=""
+  [[ -f $ROLES_DIR/_common.md ]] && body+="$(cat "$ROLES_DIR/_common.md")"$'\n\n'
+  [[ -n $ROLE_FILE ]] && body+="$(cat "$ROLE_FILE")"$'\n'
+  blank "$body" && return 1
+  ROLE_HASH=$(printf '%s' "$body" | sha256)
+  if (( ${#body} > ROLE_MAX )); then body="${body:0:ROLE_MAX}"$'\n\n(長すぎるため途中で切りました。全文は roles/ を読んでください)'; fi
+  ROLE_TEXT="# あなたの役割(agent 名: $1。roles/ から自動で渡しています。版 ${ROLE_HASH:0:12})"$'\n\n'"$body"
+}
+
+last_briefed_hash() {  # $1=session_id
+  sql "SELECT hash FROM role_briefings WHERE session_id=$(q "$1") ORDER BY id DESC LIMIT 1;"
+}
+record_briefing() {  # session agent file hash source via
+  sql "INSERT INTO role_briefings (session_id, agent, role_file, hash, source, via, created_at)
+    VALUES ($(q "$1"), $(q "$2"), NULLIF($(q "$3"),''), $(q "$4"), $(q "$5"), $(q "$6"), $(q "$(now)"));" >/dev/null
+}
+
+agent_name_by_pane() {  # $1=pane → 名前(無ければ空)
+  "$HERDR_BIN" agent list 2>/dev/null | jq -r --arg p "$1" '[.result.agents[]? | select(.pane_id==$p)][0].name // empty' 2>/dev/null
+}
+
+# SessionStart hook から呼ぶ(bin/tb-role-hook 経由)。常に終了コード 0。渡すときだけ stdout に hook 用の JSON を出す
+cmd_role-context() {
+  local src="" sid="" name
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --source) [[ $# -ge 2 ]] || return 0; src=$2; shift 2;;
+      --session-id) [[ $# -ge 2 ]] || return 0; sid=$2; shift 2;;
+      *) return 0;;
+    esac
+  done
+  [[ $src =~ ^(startup|resume|clear|compact)$ && $sid =~ ^[A-Za-z0-9._-]{1,128}$ && -n ${HERDR_PANE_ID:-} ]] || return 0
+  name=$(agent_name_by_pane "$HERDR_PANE_ID"); [[ -n $name ]] || return 0
+  load_role "$name" || return 0
+  # 同じ会話の再開で、同じ版を渡し済みなら渡さない(履歴に残っている)
+  if [[ $src == resume && $(last_briefed_hash "$sid") == "$ROLE_HASH" ]]; then return 0; fi
+  record_briefing "$sid" "$name" "${ROLE_FILE#"$ROLES_DIR"/}" "$ROLE_HASH" "$src" hook || true
+  jq -nc --arg c "$ROLE_TEXT" '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}'
+}
+
+# 動いている agent に役割(の置き場所)を送る。同じセッションに同じ版を渡し済みなら飛ばす
+# 終了コード: 0 / 10 使用中で送れなかった agent がある / 11 送信失敗がある
+cmd_role-broadcast() {
+  local only=" $* " list rc=0 name pane sess files msg r
+  list=$("$HERDR_BIN" agent list 2>/dev/null) || die "herdr agent list に失敗しました"
+  while IFS=$'\x1f' read -r pane name sess; do
+    [[ -n $name ]] || continue
+    [[ $# -eq 0 || $only == *" $name "* ]] || continue
+    if ! load_role "$name"; then echo "skip $name (役割ファイルなし)"; continue; fi
+    if [[ -n $sess && $(last_briefed_hash "$sess") == "$ROLE_HASH" ]]; then echo "skip $name (渡し済み ${ROLE_HASH:0:12})"; continue; fi
+    files="$(cd "$ROLES_DIR" && pwd)/_common.md"; [[ -n $ROLE_FILE ]] && files+=" $(cd "$(dirname "$ROLE_FILE")" && pwd)/$(basename "$ROLE_FILE")"
+    msg="[role-update / tb] あなた($name)の役割が更新されました(版 ${ROLE_HASH:0:12})。次のファイルを読み、以後はこれに従ってください: $files"
+    r=0; herdr_send "$name" "$msg" "role:$name" role 2>/dev/null || r=$?
+    if ((r)); then echo "pending $name (宛先が使用中か送信失敗。あとで再実行)"; ((r > rc)) && rc=$r; continue; fi
+    [[ -n $sess ]] && record_briefing "$sess" "$name" "${ROLE_FILE#"$ROLES_DIR"/}" "$ROLE_HASH" broadcast broadcast
+    echo "sent $name (${ROLE_HASH:0:12})"
+  done < <(jq -r '.result.agents[]? | [.pane_id, (.name // ""), (.agent_session.value // "")] | map(tostring | gsub("[\u001f\n]"; " ")) | join("\u001f")' <<<"$list")
+  return $rc
+}
+
+# agent ごとの役割ファイルと、渡した版が最新か
+cmd_roles() {
+  local json=0 list name pane sess last at state
+  [[ ${1:-} == --json ]] && json=1
+  list=$("$HERDR_BIN" agent list 2>/dev/null) || die "herdr agent list に失敗しました"
+  while IFS=$'\x1f' read -r pane name sess; do
+    [[ -n $name ]] || continue
+    last=""; at=""
+    if load_role "$name"; then
+      if [[ -n $sess ]]; then
+        last=$(last_briefed_hash "$sess")
+        at=$(sql "SELECT created_at FROM role_briefings WHERE session_id=$(q "$sess") ORDER BY id DESC LIMIT 1;")
+      fi
+      if [[ -z $last ]]; then state=never; elif [[ $last == "$ROLE_HASH" ]]; then state=current; else state=outdated; fi
+    else state=no-role; fi
+    if ((json)); then
+      jq -nc --arg n "$name" --arg p "$pane" --arg f "${ROLE_FILE#"$ROLES_DIR"/}" --arg h "${ROLE_HASH:0:12}" --arg s "$state" --arg at "$at" \
+        '{name:$n,pane:$p,role_file:$f,version:$h,state:$s,briefed_at:(if $at=="" then null else $at end)}'
+    else
+      printf '%s\t%s\t%s\t%s\t%s\n' "$name" "${ROLE_FILE#"$ROLES_DIR"/}" "${ROLE_HASH:0:12}" "$state" "${at:--}"
+    fi
+  done < <(jq -r '.result.agents[]? | [.pane_id, (.name // ""), (.agent_session.value // "")] | map(tostring | gsub("[\u001f\n]"; " ")) | join("\u001f")' <<<"$list")
+}
+
 cmd_help() {
   cat <<'USAGE'
 tb add -p <project> -t <title> [--parent ID] [--owner N] [--session S] [--account A]   → ID を表示
@@ -1044,6 +1165,11 @@ tb send <宛先 agent 名> --text T [--task T-..] [--kind task|info|answer] [--j
          終了コード 0=送信済み 10=宛先使用中で outbox に積んだ 11=送信失敗で積んだ 4=ルールで拒否 3=送信者を特定できず未保存
 tb flush            積まれた送信を届ける(tb digest も最初に呼ぶ)
 tb outbox [--status queued|sent|denied] [--json]
+
+役割の配布(roles/。SessionStart hook は bin/tb-role-hook 経由):
+tb role-context --source startup|resume|clear|compact --session-id S   hook 用。渡すときだけ hook の JSON を出す。常に 0
+tb role-broadcast [agent 名 ...]   動いている agent に役割の置き場所を送る(同じ版を渡し済みのセッションは飛ばす)
+tb roles [--json]                  agent ごとの役割ファイルと、渡した版が最新か(current|outdated|never|no-role)
 USAGE
 }
 
@@ -1052,8 +1178,9 @@ main() {
   case $cmd in
     help|-h|--help) cmd_help; return 0;;
     touch) cmd_touch "$@"; return 0;;   # 常に 0。ツールの有無チェックや init_db の失敗でも止めない
+    role-context) ( need_tools && init_db ) >/dev/null 2>&1 && cmd_role-context "$@" 2>/dev/null; return 0;;   # hook 用。常に 0
     add|list|show|claim|update|done|block|report|pending|activity) ;;
-    proxy-request|proxy-list|proxy-resolve|proxy-check|comment|comments|digest|digests|send|flush|outbox) ;;
+    proxy-request|proxy-list|proxy-resolve|proxy-check|comment|comments|digest|digests|send|flush|outbox|role-broadcast|roles) ;;
     *) usage "不明なコマンド: $cmd";;
   esac
   need_tools

@@ -20,6 +20,7 @@ conductor  <--- reports ---  workers (herdr panes)
 | [`presets/`](presets/example.conf) | Example workspace presets for `herdr-up.sh` |
 | [`herdr-up.sh`](herdr-up.sh) | Creates workspaces and starts agents from a preset |
 | [`conductor/`](conductor/README.md) | Description of the conductor role |
+| [`roles/`](roles/README.md) | Role files handed to each agent on startup / after compact (SessionStart hook), maintained by the HR agent |
 
 ## Usage
 

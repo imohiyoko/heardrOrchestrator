@@ -63,3 +63,23 @@ cat "$(dirname "$TB_DB")/touch-errors.log" 2>/dev/null   # 何も出なければ
 - 人の直接入力と `herdr agent prompt` は hook から区別できない
 - `tasks.session_id` は `tb claim --session` / `tb update --session` で入れる。入っていないタスクは `tb show` の `activity` が null になる
 - Claude Code が resume や compact で `session_id` を変えるかは未確認。変わると別の行になる
+
+## 役割の配布(SessionStart)
+
+`bin/tb-role-hook` を `SessionStart` に登録すると、起動・`/clear`・compact の後に、その agent の役割(`roles/_common.md` + `roles/<agent 名>.md`
+または `roles/map.conf` で決まるファイル)が文脈に入る。同じ会話の再開(`resume`)では、同じ版を渡し済みなら何もしない。
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "bash <TASKBOARD_DIR>/bin/tb-role-hook", "timeout": 5 } ] }
+    ]
+  }
+}
+```
+
+- stdin からは `source` と `session_id` だけを読む。agent 名は `HERDR_PANE_ID` と `herdr agent list` から引く(名前の無い agent には渡さない)
+- 常に終了コード 0・標準エラーなし。DB や herdr に失敗しても agent は止まらない(役割が渡らないだけ)
+- 役割ファイルの置き場所は `TB_ROLES`(既定 `<TASKBOARD_DIR>/../roles`)
+- 何を渡したかは `tb roles` で確認できる

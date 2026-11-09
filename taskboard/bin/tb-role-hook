@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# tb-role-hook — Claude Code の SessionStart hook から呼ぶ薄いラッパ
+# stdin の JSON から source と session_id だけを読み、`tb role-context` の出力(hook 用 JSON)をそのまま返す。
+# 失敗しても agent を止めない: 常に終了コード 0、標準エラーは空。
+TB=$(dirname "${BASH_SOURCE[0]}")/tb
+input=$(cat)
+fields=""
+command -v jq >/dev/null && fields=$(jq -r '[(.source // ""), (.session_id // "")] | map(tostring | gsub("[[:cntrl:]]"; " ")) | join("\u001f")' <<<"$input" 2>/dev/null)
+IFS=$'\x1f' read -r src sid <<<"$fields"
+"$TB" role-context --source "$src" --session-id "$sid" 2>/dev/null
+exit 0
