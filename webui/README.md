@@ -1,11 +1,11 @@
-# webui — herdr 進捗の Web UI(第 1 段: 読み取り専用)
+# webui — herdr 進捗の Web UI(第 1 段: 表示が中心)
 
 agent・タスク・報告・定期実行・台帳を、ブラウザで見るための小さなサーバー。
 Python 3 の標準ライブラリだけで動く(依存なし)。
 
 - サーバー側で HTML を組み立てる複数ページ構成(SPA ではない)。自動更新は `<meta http-equiv="refresh">`(8 秒)。
 - 全ページに共通ナビと、承認待ち件数のバッジ(報告の question/blocked + `pending-human` の代行依頼 + blocked の agent)。
-- **読み取り専用**。POST/PUT/DELETE/PATCH は 405。承認ボタンはない(承認は人が別の経路で行う)。
+- **表示が中心**。書き込みは、報告を「対応済みにする」(`POST /resolve`)だけ。agent の承認ボタンや `send-keys` はない(承認は人が手元で行う)。
 
 ## 起動
 
@@ -72,7 +72,7 @@ rm webui/run/auth.json webui/run/sessions.json
 - `sessions.json`: セッション値の SHA-256 と有効期限だけ。Cookie の値そのものは保存しない。
 - Cookie は `HttpOnly; SameSite=Strict; Path=/`。
 
-POST を受け付けるのは `/login`・`/setup`・`/logout`・`/reset` だけ。これらは `Origin`/`Referer` が自分のオリジン
+POST を受け付けるのは `/login`・`/setup`・`/logout`・`/reset`・`/resolve` だけ。これらは `Origin`/`Referer` が自分のオリジン
 (`127.0.0.1:<port>`)であることと、フォームの隠しトークン(署名付き・30 分で失効)を確認する。それ以外の
 POST/PUT/DELETE/PATCH は 405。
 
@@ -88,7 +88,7 @@ POST/PUT/DELETE/PATCH は 405。
 | --- | --- |
 | `/` | 概要(承認待ち、agent の状態、滞留、直近の完了) |
 | `/agents` | agent 一覧(状態・workspace・いま何を・最終入力/停止・警告) |
-| `/agents/<名前>` | 状態、担当タスク、直近の出力(`herdr agent read`)、最終入力/停止、`session_id`、`claude --resume <session_id>` |
+| `/agents/<名前>` | 状態、担当タスク、直近の出力(`herdr agent read`)、最終入力/停止、`session_id`(識別用)、手元で開く `herdr agent attach` のコマンド(`claude --resume` は案内しない) |
 | `/tasks`, `/tasks/<id>` | タスク一覧(`?project=` `?status=` で絞り込み)と詳細(報告・成果物・代行依頼) |
 | `/inbox` | 要対応(question・blocked・pending-human・blocked の agent)を上に、直近の報告を下に |
 | `/jobs` | `scheduler/logs/*.log` の各 job の最終記録と最後の実行 |
@@ -96,13 +96,27 @@ POST/PUT/DELETE/PATCH は 405。
 
 名前の無い agent は `pane_id`(例: `w2:p3`)が名前の代わりになる。未知の URL は 404。
 
-## データ源(すべて読み取りのみ)
+## データ源(読み取り。書き込みは `/resolve` だけ)
 
 - `herdr agent list` / `herdr agent read`(結果は 3 秒キャッシュ)
-- `taskboard/data/tasks.db`(`mode=ro` で開く。無い・壊れていても落ちず、空の表になる)
+- `taskboard/data/tasks.db`(通常は `mode=ro` で開く。無い・壊れていても落ちず、空の表になる。書き込みは下の「報告を畳む」の 1 箇所だけ)
 - `scheduler/logs/*.log`、`conductor/dispatch.jsonl`
 
 「滞留」は、`working` のまま最終入力(`agent_activity.last_prompt_at`)から 30 分を超えて停止がない agent。
+
+## 報告を畳む(「対応済みにする」)
+
+`/inbox` の要対応と `/tasks/<id>` に、未対応の `question` / `blocked` の報告ごとに「対応済みにする」ボタン(メモは任意、200 字まで)を出す。
+承認待ちの条件は `kind IN ('question','blocked') AND resolved_at IS NULL`(taskboard の `tb resolve` と同じ)で、バッジの件数もこれに従う。
+
+- 更新するのは `comments.resolved_at` / `resolved_note` だけ。本文・種別は変えない。同じ報告を 2 回畳んでも無害(最初の時刻とメモが残る)。
+- `POST /resolve` はログイン済みであること、ログインと同じ CSRF 検査(Origin/Referer と署名付き hidden トークン)を通ること、が条件。
+- DB は通常 `mode=ro` で開く。書き込みはこの操作専用の短い別接続だけで、SQL は固定(値はプレースホルダ)。DB がロック中なら 503 を返す。
+  `resolved_at` 列が無い古い DB では画面は崩れず、ボタンを出さない(`tb` で移行すると使える)。
+- 操作ログに `resolve: user=<ユーザー名> id=C-<ID> <結果>` を 1 行残す。メモの本文は残さない。
+- 入力欄があるページ(未対応の報告があるとき)は、入力が消えないよう自動更新しない。
+- **畳めるのは人だけ。** agent が代わりに畳む経路はない(人のブラウザの POST だけ)。
+  blocked の **agent**(herdr の承認ダイアログ)にはこのボタンを付けない。あれは `herdr agent attach` で人が操作する。
 
 ## 承認待ちの対応(手元の herdr で行う)
 

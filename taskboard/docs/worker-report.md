@@ -20,6 +20,11 @@ tb は <TASKBOARD_DIR>/bin/tb。
 報告者の名前は herdr から自動で付く。名前・pane は指定できない。
 ```
 
+## question / blocked は人が畳むまで残る
+- `question` / `blocked` は、人が `tb resolve C-<n> [-m メモ]` で対応済みにするまで承認待ちに残る(`tb comments --open` で一覧)
+- **worker は resolve できない。** 報告者として登録された agent の pane からの実行は拒否される。自分で畳もうとせず、人の返答を待つ
+- resolve しても報告の本文・kind は変わらない。`progress` / `done` は resolve の対象外
+
 ## 仕組み(指揮官・人向け)
 - 先に `comments` に保存し、成功したら指揮官へ `herdr agent prompt` で送る。宛先は `config/projects.conf`(既定 `conductor`)
 - 送る文面は固定: `[from: <名前> / <pane> / <task-id> / <kind>] <本文の先頭 200 字> (詳細: tb comments <task-id>)`
