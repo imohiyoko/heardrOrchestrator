@@ -20,6 +20,7 @@ conductor  <--- reports ---  workers (herdr panes)
 | [`presets/`](presets/example.conf) | Example workspace presets for `herdr-up.sh` |
 | [`herdr-up.sh`](herdr-up.sh) | Creates workspaces and starts agents from a preset |
 | [`conductor/`](conductor/README.md) | Description of the conductor role |
+| [`setup/`](setup/README.md) | Setup agent (`./herdr-up.sh setup`) that walks you through the setup and asks before writing any settings, plus a read-only doctor `setup/check.sh` |
 
 ## Usage
 
@@ -29,8 +30,9 @@ Each component has its own README and test script:
 bash taskboard/test/run.sh
 bash webui/tests/run.sh
 bash scheduler/tests/run.sh
+bash setup/tests/run.sh
 ```
 
 Tests use fake `herdr` binaries and do not touch a real herdr, launchd, or the network. Runtime state (`data/`, `run/`, `logs/`, `generated/`) is git-ignored.
 
-Copy `scheduler/jobs/*.conf.example` to `*.conf` and adjust before use.
+Copy `scheduler/jobs/*.conf.example` to `*.conf` and adjust before use, or start the setup agent with `./herdr-up.sh setup` and let it guide you. `bash setup/check.sh` shows what is installed and what is missing.

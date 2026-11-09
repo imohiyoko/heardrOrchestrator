@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# 疑似 herdr。FAKE_HERDR_DOWN=1 なら server が応答しない。呼ばれた引数を FAKE_LOG に残す
+echo "herdr $*" >>"${FAKE_LOG:-/dev/null}"
+case "$1 ${2:-}" in
+  "workspace list") [ "${FAKE_HERDR_DOWN:-0}" = 1 ] && exit 1
+                    echo '{"result":{"workspaces":[]}}' ;;
+  *) echo "fake herdr: unsupported: $*" >&2; exit 99 ;;
+esac
