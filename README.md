@@ -14,7 +14,7 @@ conductor  <--- reports ---  workers (herdr panes)
 
 | Path | What it is |
 |---|---|
-| [`taskboard/`](taskboard/README.md) | `tb` CLI: SQLite task table, worker reports batched to the conductor every 10 min (`tb digest`), a log of every message tb sends, hook-based activity tracking (bash, sqlite3, jq) |
+| [`taskboard/`](taskboard/README.md) | `tb` CLI: SQLite task table, worker reports batched to the conductor every 10 min (`tb digest`), conductor → worker sends with sender check and routing rules (`tb send`), a log of every message tb sends, hook-based activity tracking (bash, sqlite3, jq) |
 | [`webui/`](webui/README.md) | Read-only progress web UI with login (Python standard library only) |
 | [`scheduler/`](scheduler/README.md) | Periodic prompts / commands via launchd, driven by `jobs/*.conf` |
 | [`presets/`](presets/example.conf) | Example workspace presets for `herdr-up.sh` |
