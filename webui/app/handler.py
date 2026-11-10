@@ -13,12 +13,12 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 import auth
 
-from .config import COOKIE, HOST, JOB_RE, RUN_DIR, cfg
+from .config import COOKIE, HOST, JOB_RE, ROOT, RUN_DIR, cfg
 from .sanitize import clean, e
 from .actions import resolve_comment
 from .data import NOTIFY_POLL_SEC, badge_count, urgent_items
 from .jobs import job_names, save_job_settings
-from .views import CSS, NOTIFY_JS, err_html, page, page_job, route
+from .views import CSS, DOCS_JS, NOTIFY_JS, err_html, page, page_job, route
 
 
 def plain_page(title, body):
@@ -74,6 +74,19 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write(f"{self.log_date_time_string()} {line[0]} {path} {args[1] if len(args) > 1 else ''}\n")
         except Exception:
             pass
+
+    _static_cache = {}
+
+    def _send_static(self, name, ctype):
+        """webui/static/ の同梱ファイル(名前は呼び出し側で固定)。ログイン後だけ。"""
+        data = self._static_cache.get(name)
+        if data is None:
+            try:
+                with open(os.path.join(ROOT, "static", name), "rb") as f:
+                    data = self._static_cache[name] = f.read()
+            except OSError:
+                return self._text(404, "Not Found")
+        return self._send(200, data, ctype)
 
     def _send(self, code, body, ctype="text/html; charset=utf-8", extra=()):
         data = body.encode("utf-8") if isinstance(body, str) else body
@@ -192,6 +205,10 @@ class Handler(BaseHTTPRequestHandler):
                   '<button type=submit>ログアウト</button></form>')
         if path == "/notify.js":
             return self._send(200, NOTIFY_JS, "text/javascript; charset=utf-8")
+        if path == "/docs.js":
+            return self._send(200, DOCS_JS, "text/javascript; charset=utf-8")
+        if path == "/static/mermaid.min.js":
+            return self._send_static("mermaid.min.js", "text/javascript; charset=utf-8")
         try:
             m = re.fullmatch(r"/jobs/([^/]+)/?", unquote(path))
             if m:  # 設定フォーム(自動更新しない)
@@ -205,7 +222,8 @@ class Handler(BaseHTTPRequestHandler):
             if r is None:
                 return self._send(404, page("見つかりません", "<p>そのページはありません。</p>", "", badge_count(), logout))
             title, body = r
-            self._send(200, page(title, body, path, badge_count(), logout, refresh=not ctx.get("norefresh")))
+            self._send(200, page(title, body, path, badge_count(), logout, refresh=not ctx.get("norefresh"),
+                                 scripts=ctx.get("scripts", ())))
         except Exception as ex:  # 1 ページの失敗でサーバーを落とさない(例外の内容は出さない)
             sys.stderr.write(f"internal error: {type(ex).__name__}\n")
             self._text(500, "Internal Server Error")

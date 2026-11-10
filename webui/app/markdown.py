@@ -1,6 +1,6 @@
 """最小限の Markdown → HTML。外部由来の本文なので、必ず先に e() でエスケープしてから記法を当てる。
 
-対応: 見出し・段落・箇条書き(番号つき含む)・引用・コードブロック(```)・水平線・表(| 区切り)・
+対応: ```mermaid(<pre class=mermaid> にして、ブラウザ側で図にする)・見出し・段落・箇条書き(番号つき含む)・引用・コードブロック(```)・水平線・表(| 区切り)・
 インライン(`code`・**太字**・*斜体*・~~取り消し~~・[文字](http(s)://...))。
 生の HTML は書かれていても文字として出す。リンクは http(s) だけを外部リンクにし、それ以外は文字のまま。
 """
@@ -83,7 +83,10 @@ def render(text):
                 body.append(lines[i])
                 i += 1
             i += 1
-            out.append(f"<pre><code>{e(chr(10).join(body))}</code></pre>")
+            if m.group(2).lower() == "mermaid":  # 図の元。同梱の mermaid.js が描く(JS が無ければこのまま読める)
+                out.append(f"<pre class=mermaid>{e(chr(10).join(body))}</pre>")
+            else:
+                out.append(f"<pre><code>{e(chr(10).join(body))}</code></pre>")
             continue
         if not line.strip():
             flush()

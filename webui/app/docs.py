@@ -4,6 +4,8 @@
 - `C-<報告id>/<n>`: comments.deliverables の n 番目
 - `task:<タスクid>/<n>`: tasks.deliverables の n 番目
 - `A-<アラートid>`: alerts.result_path(解析レポート。ファイルが無くても DB に保存された本文を出す)
+パスを直接指定して開くこともできる(`open_path`)。その場合は agent の作業ディレクトリ(agent_activity.cwd)と
+WEBUI_DOC_ROOTS の配下だけ。ホームディレクトリや / そのものは範囲として広すぎるので使わない。
 相対パスは、報告した agent の作業ディレクトリ(agent_activity.cwd)を基準にする。
 ディレクトリが成果物なら、その中のファイルも(外へ出ない範囲で)見られる。
 """
@@ -13,7 +15,7 @@ import os
 import re
 import stat
 
-from .config import RUN_DIR
+from .config import RUN_DIR, cfg
 from .data import q
 
 MAX_BYTES = 1024 * 1024        # これより大きいファイルは先頭だけ出す
@@ -220,3 +222,36 @@ def comment_refs(cid, deliverables):
 
 def task_refs(tid, deliverables):
     return [(f"task:{tid}/{i}", raw) for i, raw in enumerate(_json_list(deliverables))]
+
+
+def allowed_roots():
+    """パス指定で開いてよい範囲(実体の絶対パス)。agent の作業ディレクトリと WEBUI_DOC_ROOTS(: 区切り)。"""
+    cands = [r.get("cwd") for r in q("SELECT DISTINCT cwd FROM agent_activity WHERE cwd IS NOT NULL AND cwd != ''")]
+    cands += [x for x in cfg("WEBUI_DOC_ROOTS", "").split(os.pathsep) if x]
+    broad = {os.path.realpath(os.path.expanduser("~")), "/", os.path.realpath("/Users"), os.path.realpath("/home"),
+             os.path.realpath("/tmp"), os.path.realpath("/private/tmp")}
+    out = []
+    for c in cands:
+        c = os.path.expanduser(str(c))
+        if not os.path.isabs(c):
+            continue
+        r = os.path.realpath(c)
+        if r in broad or r in out or not os.path.isdir(r):
+            continue
+        out.append(r)
+    return sorted(out)
+
+
+def open_path(raw):
+    """パス指定 → (実体の絶対パス, None) か (None, 理由)。"""
+    s = (raw or "").strip()
+    if s.startswith("file://"):
+        s = s[len("file://"):]
+    s = os.path.expanduser(s)
+    if not s or "\x00" in s or not os.path.isabs(s):
+        return None, "絶対パス(/ か ~ で始まる)を指定してください"
+    p = os.path.realpath(s)
+    for r in allowed_roots():
+        if p == r or p.startswith(r + os.sep):
+            return p, None
+    return None, "agent の作業ディレクトリの外なので開けません"

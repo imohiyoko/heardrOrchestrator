@@ -602,7 +602,28 @@ check("URL の成果物は外部リンク", 'href="https://example.com/pr/1"' in
 b = V(f"A-{_aid}")[2]
 check("アラートの解析レポートは DB の本文を出す", "DB の本文" in b and "<h3 class=md>原因</h3>" in b and "&lt;script&gt;" in b)
 check("登録されていない参照は 404", all(V(x)[0] == 404 for x in (f"C-{_cid}/99", "C-99999/0", "task:nope/0", "T-1/0", "A-99999", "/etc/passwd", "")))
-check("パスを直接指定する経路はない", cl.get("/docs/view?path=/etc/passwd")[0] == 404)
+# パスを指定して開く(agent の作業ディレクトリ配下だけ)
+check("/docs に開ける範囲(agent の作業ディレクトリ)が出る", f"<code>{DOCS}</code>" in cl.get("/docs")[2])
+b = V("", path=os.path.join(DOCS, "summary.md"))[2]
+check("作業ディレクトリ配下のパスは開ける(Markdown 整形)", "<div class=doc>" in b and "<strong>太字</strong>" in b)
+check("パス指定でもフォルダの中を開ける", "内側のファイル" in V("", path=os.path.join(DOCS, "out"), sub="sub/note.txt")[2])
+for bad in ("/etc/passwd", os.path.join(d, "outside.txt"), os.path.join(DOCS, "out", "link.txt"), os.path.join(DOCS, "..", "outside.txt"),
+            "summary.md", "~"):
+    b = V("", path=bad)[2]
+    check(f"範囲外・相対は開けない: {bad}", "開けません" in b or "絶対パス" in b, bad)
+check("パス指定でも .env は開かない", "SECRET" not in V("", path=os.path.join(DOCS, ".env"))[2])
+# Mermaid(同梱の mermaid.js でブラウザが描く)
+open(os.path.join(DOCS, "flow.md"), "w").write("# 図\n\n```mermaid\ngraph TD\n  A[" + XSS + "] --> B\n```\n")
+open(os.path.join(DOCS, "seq.mmd"), "w").write("sequenceDiagram\n  A->>B: hi\n")
+b = V("", path=os.path.join(DOCS, "flow.md"))[2]
+check("```mermaid は pre.mermaid(中身はエスケープ)", "<pre class=mermaid>graph TD\n  A[&lt;script&gt;" in b)
+check("Mermaid があるページだけ同梱 JS を読む", '<script src="/static/mermaid.min.js" defer>' in b and '<script src="/docs.js" defer>' in b
+      and "/static/mermaid.min.js" not in V("", path=os.path.join(DOCS, "summary.md"))[2])
+check(".mmd も図にする", "<pre class=mermaid>sequenceDiagram" in V("", path=os.path.join(DOCS, "seq.mmd"))[2])
+s_, h, b = cl.get("/static/mermaid.min.js")
+check("同梱の mermaid.min.js を同一オリジンから配る", s_ == 200 and h.get("Content-Type", "").startswith("text/javascript") and len(b) > 100000)
+check("未ログインでは同梱 JS も読めない", Client(port).get("/static/mermaid.min.js")[0] == 302 and Client(port).get("/docs.js")[0] == 302)
+check("static の他のファイルは出さない", cl.get("/static/mermaid.LICENSE")[0] == 404 and cl.get("/static/../app/docs.py")[0] == 404)
 b = cl.get("/tasks/T-1")[2]
 check("タスク画面の成果物が Web UI へのリンクになる", f'href="/docs/view?ref=C-{_cid}%2F0"' in b and f'href="/docs/view?ref=task%3AT-1%2F0"' in b)
 
