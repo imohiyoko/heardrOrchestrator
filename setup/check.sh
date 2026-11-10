@@ -154,7 +154,7 @@ if [ -f "$db" ]; then
   for f in "$ROOT"/taskboard/schema/[0-9][0-9][0-9]_*.sql; do [ -f "$f" ] && latest=$((10#$(basename "$f" | cut -c1-3))); done
   ver=""; have sqlite3 && ver=$(sqlite3 -readonly "$db" "PRAGMA user_version;" 2>/dev/null)
   if [[ $ver =~ ^[0-9]+$ ]] && [ "$latest" -gt 0 ] && [ "$ver" -lt "$latest" ]; then
-    report info "taskboard:db" "$db(スキーマ v$ver、最新は v$latest。次に tb を実行したとき移行される)"
+    report info "taskboard:db" "$db(スキーマ v${ver}、最新は v${latest}。次に tb を実行したとき移行される)"
   else report ok "taskboard:db" "$db${ver:+(スキーマ v$ver)}"; fi
 else report info "taskboard:db" "まだない(最初の tb add で作られる): $db"; fi
 
