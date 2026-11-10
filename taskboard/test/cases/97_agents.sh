@@ -91,3 +91,14 @@ sqlite3 "$TB_DB" "UPDATE agents SET state='stopped', cwd='/no/such/dir', session
 eq "agent-revive: resume needs the original cwd" "$($TB agent-revive helper1 2>&1 | grep -c '作業ディレクトリがありません')" "1"
 eq "agent-revive --fresh: falls back to TB_AGENT_CWD" "$($TB agent-revive helper1 --fresh | grep -c "cwd $TMP")" "1"
 unset FAKE_AGENTS; export HERDR_PANE_ID=$_saved_pane
+_saved_pane=${HERDR_PANE_ID-}; unset HERDR_PANE_ID
+export TB_DB=$TMP/agents.db TB_APPROVALS=$TMP/appr-agent.conf TB_SPAWN_RETRY_SEC=0 TB_AGENT_CWD=$TMP
+export FAKE_AGENTS="[$A_C,$A_S]"
+eq "requester: herdr list failure is not treated as a human" "$(FAKE_LIST_FAIL=1 HERDR_PANE_ID=wC:p1 rc $TB agent-stop worker1 --force) $(FAKE_LIST_FAIL=1 HERDR_PANE_ID=wC:p1 rc $TB agent-reject L-1)" "1 1"
+printf 'agent:new:* = allow\n* = ask\n' >"$TB_APPROVALS"
+eq "agent-new --killable: not from a non-sweeper agent" "$(HERDR_PANE_ID=wC:p1 $TB agent-new helper5 --killable yes 2>&1 | grep -c '判定役')" "1"
+mkdir -p "$TMP/rel/sub"
+out=$(cd "$TMP/rel" && HERDR_PANE_ID=wC:p1 TB_APPROVALS=$TMP/appr-ask.conf $TB agent-new helper6 --cwd sub; true)
+eq "agent-new: relative --cwd stored as absolute" "$(sqlite3 "$TB_DB" "SELECT json_extract(args,'\$.cwd') FROM agent_ops WHERE target='helper6';")" "$TMP/rel/sub"
+export TB_APPROVALS=$TMP/appr.conf
+unset FAKE_AGENTS; export HERDR_PANE_ID=$_saved_pane

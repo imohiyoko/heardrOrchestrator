@@ -48,6 +48,13 @@ record_briefing() {  # session agent file hash source via
     VALUES ($(q "$1"), $(q "$2"), NULLIF($(q "$3"),''), $(q "$4"), $(q "$5"), $(q "$6"), $(q "$(now)"));" >/dev/null
 }
 
+# 人か agent かの判定用: 一覧を取れなければ 1(「名前が無い」= 人の pane と区別する)
+pane_owner_name() {  # $1=pane → 名前(無ければ空)
+  local out
+  out=$(herdr_call agent list 2>/dev/null) || return 1
+  jq -r --arg p "$1" '[.result.agents[]? | select(.pane_id==$p)][0].name // empty' <<<"$out" 2>/dev/null || return 1
+}
+
 agent_name_by_pane() {  # $1=pane → 名前(無ければ空)
   herdr_call agent list 2>/dev/null | jq -r --arg p "$1" '[.result.agents[]? | select(.pane_id==$p)][0].name // empty' 2>/dev/null
 }

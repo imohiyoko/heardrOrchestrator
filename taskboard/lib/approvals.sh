@@ -28,7 +28,7 @@ approval_of() {
 require_human() {
   local pane=${HERDR_PANE_ID:-} n
   [[ -n $pane ]] || return 0
-  n=$(agent_name_by_pane "$pane")
+  n=$(pane_owner_name "$pane") || die "$1: herdr agent list に失敗したため、人の端末からの実行か確かめられません"
   [[ -z $n ]] || die "$1 は人が自分の端末で実行します(agent '$n' の pane からは実行できません)"
 }
 

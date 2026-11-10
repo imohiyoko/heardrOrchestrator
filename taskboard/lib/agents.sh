@@ -87,7 +87,9 @@ killable_of() {
 REQ_BY=""
 requester() {
   local n=""
-  [[ -n ${HERDR_PANE_ID:-} ]] && n=$(agent_name_by_pane "$HERDR_PANE_ID")
+  if [[ -n ${HERDR_PANE_ID:-} ]]; then
+    n=$(pane_owner_name "$HERDR_PANE_ID") || die "herdr agent list に失敗したため、実行者を特定できません"
+  fi
   REQ_BY=${n:-human}
 }
 
@@ -245,9 +247,15 @@ cmd_agent-new() {
     [[ $role =~ $ROLE_RE && $role != _* && $role != README && -f $ROLES_DIR/$role.md ]] || usage "agent-new: --role は roles/<名前>.md の名前: $role"
   fi
   [[ $kill == yes || $kill == no || $kill == unknown ]] || usage "agent-new: --killable は yes|no"
+  if [[ $kill != unknown ]]; then   # 判定フラグを付けられるのは agent-flag と同じく判定役か人だけ
+    requester
+    # shellcheck disable=SC2053  # glob として比べる
+    [[ $REQ_BY == human || $REQ_BY == $SWEEPER_PAT ]] || die "agent-new --killable を付けられるのは判定役($SWEEPER_PAT)か人だけです($REQ_BY)"
+  fi
   [[ ${#prompt} -le 4000 ]] || usage "agent-new: --prompt は 4000 字まで"
   [[ -n $cwd ]] || cwd=$AGENT_CWD
   cwd=${cwd/#\~/$HOME}
+  [[ ! -d $cwd ]] || cwd=$(cd "$cwd" && pwd)   # 承認する側のカレントで解決されないよう、依頼時に絶対パスにする
   op_entry new "$name" "$(jq -nc --arg c "$cwd" --arg m "$model" --arg r "$role" --arg p "$prompt" --arg k "$kill" \
     '{cwd:$c} + (if $m=="" then {} else {model:$m} end) + (if $r=="" then {} else {role:$r} end) + (if $p=="" then {} else {prompt:$p} end) + {killable:$k}')"
 }

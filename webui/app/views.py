@@ -193,8 +193,8 @@ def page_agents(qs, ctx=None):
         ["名前", "止めた時刻", "会話 (session)", "cwd", "モデル / 役割", "操作"],
         [[e(r["name"]), e(r.get("stopped_at")), f'<code>{e(r.get("session_id"))}</code>' if r.get("session_id") else "-",
           e(r.get("cwd")), f'{e(r.get("model") or "-")} / {e(r.get("role") or "-")}',
-          (op_form(ctx, "revive", r["name"], "同じ会話で復活") if r.get("session_id") else "") + " " +
-          op_form(ctx, "revive-fresh", r["name"], "新しい会話で復活") if ctx.get("csrf") else ""] for r in stopped])
+          ((op_form(ctx, "revive", r["name"], "同じ会話で復活") if r.get("session_id") else "") + " " +
+           op_form(ctx, "revive-fresh", r["name"], "新しい会話で復活")) if ctx.get("csrf") else ""] for r in stopped])
     body += "<h2>直近の操作</h2>" + table(
         ["id", "操作", "対象", "依頼者", "結果", "内容", "時刻"],
         [[f"L-{o['id']}", e(o["op"]), e(o["target"]), e(o["requested_by"]), e(o["status"]), e(o.get("result")),
@@ -212,8 +212,8 @@ def page_agent_new(csrf, error="", form=None):
         roles = []
     opts = '<option value="">(名前と roles/map.conf で決める)</option>' + "".join(
         f'<option value="{e(r)}"{" selected" if f.get("role") == r else ""}>{e(r)}</option>' for r in roles)
-    kopts = "".join(f'<option value="{v}"{" selected" if f.get("killable", "unknown") == v else ""}>{l}</option>'
-                    for v, l in (("unknown", "判定役に任せる"), ("yes", "止めてよい(使い捨て)"), ("no", "止めない(常駐)")))
+    kopts = "".join(f'<option value="{v}"{" selected" if f.get("killable", "unknown") == v else ""}>{lab}</option>'
+                    for v, lab in (("unknown", "判定役に任せる"), ("yes", "止めてよい(使い捨て)"), ("no", "止めない(常駐)")))
     body = err_html(error) + (
         f'<form method=post action="/agent-new"><input type=hidden name=csrf value="{e(csrf)}">'
         f'<p><label>名前(英小文字で始まる英小文字・数字・_・-、32 字以内)<br><input name=name required maxlength=32 pattern="[a-z][a-z0-9_-]{{0,31}}" value="{e(f.get("name", ""))}"></label></p>'

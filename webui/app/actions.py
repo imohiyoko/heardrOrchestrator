@@ -19,7 +19,7 @@ def _run_tb(args, timeout=15):
         p = subprocess.run(["bash", TB, *args], env=env, capture_output=True, text=True, timeout=timeout,
                            stdin=subprocess.DEVNULL, errors="replace")
     except (OSError, subprocess.SubprocessError):
-        return 1, ""
+        return -1, ""  # tb の終了コードと重ならない値(タイムアウトを「断った」と見せない)
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
