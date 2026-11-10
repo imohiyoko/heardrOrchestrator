@@ -128,7 +128,7 @@ def req(port, method, path, cookie=None, host=None):
 os.makedirs(os.path.join(TMP, "fake"))
 XSS = "<script>alert(1)</script>"
 agents = {"id": "x", "result": {"agents": [
-    {"name": "alpha", "agent": "claude", "agent_status": "working", "pane_id": "w1:p1", "workspace_id": "w1",
+    {"name": "alpha", "agent": "claude", "agent_status": "working", "pane_id": "w1:p1", "workspace_id": "w1", "cwd": TMP,
      "agent_session": {"kind": "id", "value": "11111111-2222-3333-4444-555555555555"},
      "terminal_title_stripped": "title " + XSS},
     {"name": "<img src=x onerror=alert(2)>", "agent": "claude", "agent_status": "blocked", "pane_id": "w1:p2",

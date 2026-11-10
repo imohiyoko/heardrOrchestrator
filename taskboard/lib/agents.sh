@@ -182,8 +182,12 @@ do_agent_revive() {  # name fresh model prompt by
   [[ -n $row ]] || { OP_OUT="$name は台帳にありません(新しく作るなら tb agent-new)"; return 1; }
   ! other_session "$name" || return 1
   cwd=$(jq -r '.cwd // ""' <<<"$row"); [[ -n $model ]] || model=$(jq -r '.model // ""' <<<"$row")
-  [[ -n $cwd && -d $cwd ]] || cwd=$(cd "$AGENT_CWD" && pwd)
   sess=""; [[ $fresh == 1 ]] || sess=$(jq -r '.session_id // ""' <<<"$row")
+  if [[ -z $cwd || ! -d $cwd ]]; then
+    # claude --resume は会話を作業ディレクトリごとに探すので、別の場所では同じ会話に戻れない
+    [[ -z $sess ]] || { OP_OUT="$name の作業ディレクトリがありません(${cwd:-未記録})。--fresh なら $AGENT_CWD で新しい会話として起動します"; return 1; }
+    cwd=$(cd "$AGENT_CWD" && pwd)
+  fi
   local -a args=()
   [[ -n $sess ]] && args+=(--resume "$sess")
   [[ -n $model ]] && args+=(--model "$model")

@@ -85,3 +85,9 @@ eq "agent-revive: other herdr session → 1 with a hint" "$($TB agent-revive far
 eq "agent-stop: other herdr session → hint" "$($TB agent-stop far --force 2>&1 | grep -c 'HERDR_SESSION=other')" "1"
 export TB_APPROVALS=$TMP/appr.conf
 unset FAKE_AGENTS; export HERDR_PANE_ID=$_saved_pane
+_saved_pane=${HERDR_PANE_ID-}; unset HERDR_PANE_ID
+export TB_DB=$TMP/agents.db TB_SPAWN_RETRY_SEC=0 TB_AGENT_CWD=$TMP FAKE_AGENTS='[]'
+sqlite3 "$TB_DB" "UPDATE agents SET state='stopped', cwd='/no/such/dir', session_id='sz' WHERE name='helper1';"
+eq "agent-revive: resume needs the original cwd" "$($TB agent-revive helper1 2>&1 | grep -c '作業ディレクトリがありません')" "1"
+eq "agent-revive --fresh: falls back to TB_AGENT_CWD" "$($TB agent-revive helper1 --fresh | grep -c "cwd $TMP")" "1"
+unset FAKE_AGENTS; export HERDR_PANE_ID=$_saved_pane
