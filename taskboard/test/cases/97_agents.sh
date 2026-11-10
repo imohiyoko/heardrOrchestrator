@@ -102,3 +102,8 @@ out=$(cd "$TMP/rel" && HERDR_PANE_ID=wC:p1 TB_APPROVALS=$TMP/appr-ask.conf $TB a
 eq "agent-new: relative --cwd stored as absolute" "$(sqlite3 "$TB_DB" "SELECT json_extract(args,'\$.cwd') FROM agent_ops WHERE target='helper6';")" "$TMP/rel/sub"
 export TB_APPROVALS=$TMP/appr.conf
 unset FAKE_AGENTS; export HERDR_PANE_ID=$_saved_pane
+_saved_pane=${HERDR_PANE_ID-}; unset HERDR_PANE_ID
+export TB_DB=$TMP/agents.db FAKE_AGENTS="[$A_C,$A_S]"
+(cd "$TMP/rel" && HERDR_PANE_ID=wC:p1 TB_APPROVALS=$TMP/appr-ask.conf $TB agent-new helper7 --cwd notyet >/dev/null 2>&1)
+eq "agent-new: missing relative --cwd is still anchored to the requester" "$(sqlite3 "$TB_DB" "SELECT json_extract(args,'\$.cwd') FROM agent_ops WHERE target='helper7';")" "$TMP/rel/notyet"
+unset FAKE_AGENTS; export HERDR_PANE_ID=$_saved_pane
