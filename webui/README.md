@@ -114,7 +114,7 @@ POST/PUT/DELETE/PATCH は 405。
 - `taskboard/data/tasks.db`(`mode=ro` で開く。無い・壊れていても落ちず、空の表になる)
 - 成果物として登録されたローカルのファイル(`/docs`。読むだけ)
 - `scheduler/logs/*.log`、`scheduler/jobs/*.conf`(`scheduler/bin/show.sh` 経由)、`conductor/dispatch.jsonl`
-- 書き込むのは `scheduler/settings/<job>.settings` だけ。入力は数値・`HH:MM`・決まった曜日だけを受け付け、scheduler が読めない内容なら元に戻す
+- 書き込むのは `scheduler/settings/<job>.settings` だけ。入力は数値(間隔は分か秒)・`HH:MM` か `HH:MM:SS`・決まった曜日だけを受け付け、scheduler が読めない内容なら元に戻す
 
 「滞留」は、`working` のまま最終入力(`agent_activity.last_prompt_at`)から 30 分を超えて停止がない agent。
 

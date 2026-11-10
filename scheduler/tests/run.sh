@@ -128,6 +128,51 @@ ln -sf /etc/hostname "$SCHED_SETTINGS_DIR/sym.settings"; cp "$JOBS_DIR/t.conf" "
 DRY_RUN=1 NOW="$THU 09:00" bash bin/tick.sh sym >/dev/null 2>&1; ok "settings: シンボリックリンクは拒否" "$?" 2
 rm -rf "$SCHED_SETTINGS_DIR"; unset SCHED_SETTINGS_DIR
 
+# ---- 秒単位
+cat >"$JOBS_DIR/sec.conf" <<'C'
+TARGET=dummy
+PROMPT='do the thing'
+WINDOW=09:00:30-09:02
+INTERVAL_SEC=20
+C
+# check の先頭行だけでなく全行の action を見る
+acts() { DRY_RUN=1 NOW="$2" FAKE_STATE=idle bash bin/tick.sh "$1" 2>&1 | jq -r '"\(.at[11:]) \(.action)"' | tr '\n' ' '; }
+check "秒: 始端 09:00:30 は実行"             sent             sec "$THU 09:00:30" idle
+check "秒: 09:00:50 は実行(20 秒刻み)"       sent             sec "$THU 09:00:50" idle
+check "秒: 09:00:40 は刻みの外"              skipped_interval sec "$THU 09:00:40" idle
+check "秒: 09:00:29 は窓の外"                skipped_window   sec "$THU 09:00:29" idle
+check "秒: 終端 HH:MM はその分の 59 秒まで含む" sent           sec "$THU 09:02:50" idle
+SCHED_WINDOW=09:00:30-09:02:10 check "秒: 終端を秒まで書けばその秒まで" skipped_window sec "$THU 09:02:30" idle
+SCHED_WINDOW=09:00:30-09:02:10 check "秒: 終端ちょうどは実行"     sent           sec "$THU 09:02:10" idle
+check "秒: 09:03:00 は窓の外"                skipped_window   sec "$THU 09:03:00" idle
+ok "秒: 分指定の NOW はその分の回をすべて判定" "$(acts sec "$THU 09:01")" "09:01:10 sent 09:01:30 sent 09:01:50 sent "
+ok "秒: 窓が分の途中から始まる"                "$(acts sec "$THU 09:00")" "09:00:30 sent 09:00:50 sent "
+ok "分単位の既存ジョブは 1 分に 1 回だけ"       "$(acts t "$THU 09:05")" "09:05:00 sent "
+ok "ログの at は秒まで"                       "$(acts t "$THU 09:05:00")" "09:05:00 sent "
+ok "分単位ジョブを秒まで指定: 09:05:30 は刻みの外" "$(acts t "$THU 09:05:30")" "09:05:30 skipped_interval "
+ok "show.sh: 秒の間隔は interval_min が null" "$(bash bin/show.sh sec | jq -c '[.interval_min,.interval_sec,.start,.end]')" '[null,20,"09:00:30","09:02"]'
+ok "show.sh: 分の間隔は両方出る" "$(bash bin/show.sh t | jq -c '[.interval_min,.interval_sec]')" '[5,300]'
+SCHED_INTERVAL_SEC=30 check "SCHED_INTERVAL_SEC=30: 09:00:30 は実行" sent t "$THU 09:00:30" idle
+SCHED_INTERVAL_SEC=30 check "SCHED_INTERVAL_SEC は conf の INTERVAL_MIN より優先" skipped_interval t "$THU 09:00:20" idle
+printf 'TARGET=dummy\nPROMPT=x\nWINDOW=09:00-10:00\nINTERVAL_MIN=1\nINTERVAL_SEC=30\n' >"$JOBS_DIR/both_iv.conf"
+DRY_RUN=1 NOW="$THU 09:00" bash bin/tick.sh both_iv >/dev/null 2>&1; ok "INTERVAL_MIN と INTERVAL_SEC の同時指定はエラー" "$?" 2
+for bad in "WINDOW=09:00-10:00 INTERVAL_SEC=0" "WINDOW=09:00:60-10:00 INTERVAL_SEC=5" "WINDOW=09:00:5-10:00 INTERVAL_SEC=5"; do
+  printf 'TARGET=dummy\nPROMPT=x\n%s\n' $bad >"$JOBS_DIR/badsec.conf"
+  DRY_RUN=1 NOW="$THU 09:00" bash bin/tick.sh badsec >/dev/null 2>&1; ok "不正な秒指定はエラー: $bad" "$?" 2
+done
+export SCHED_SETTINGS_DIR="$TMP/settings"; mkdir -p "$SCHED_SETTINGS_DIR"
+printf 'INTERVAL_SEC=15\nSTART=10:00:00\nEND=10:00:45\n' >"$SCHED_SETTINGS_DIR/t.settings"
+ok "settings: INTERVAL_SEC と HH:MM:SS" "$(acts t "$THU 10:00")" "10:00:00 sent 10:00:15 sent 10:00:30 sent 10:00:45 sent "
+printf 'INTERVAL_MIN=1\nINTERVAL_SEC=15\n' >"$SCHED_SETTINGS_DIR/t.settings"
+DRY_RUN=1 NOW="$THU 10:00" bash bin/tick.sh t >/dev/null 2>&1; ok "settings: INTERVAL_MIN と INTERVAL_SEC の同時指定は拒否" "$?" 2
+printf 'INTERVAL_SEC=15\n' >"$SCHED_SETTINGS_DIR/t.settings"
+ok "settings の INTERVAL_SEC は conf の INTERVAL_MIN を上書き" "$(acts t "$THU 09:00" | wc -w | tr -d ' ')" 8
+rm -rf "$SCHED_SETTINGS_DIR"; unset SCHED_SETTINGS_DIR
+mkcmd0() { printf "COMMAND='echo hi'\nWINDOW=00:00-23:59\nINTERVAL_SEC=%s\n" "$2" >"$JOBS_DIR/$1.conf"; }
+mkcmd0 csec 30
+NOW="$THU 12:00" bash bin/tick.sh csec
+ok "COMMAND 型 30 秒刻み: 1 分で 2 回実行" "$(jq -r '"\(.at[11:]) \(.action)"' "$LOG_DIR/csec.log" | tr '\n' ' ')" "12:00:00 ran 12:00:30 ran "
+
 # ---- COMMAND 型
 mkcmd() { printf '%s\nWINDOW=%s\nINTERVAL_MIN=2\n' "$2" "${3:-00:00-23:59}" >"$JOBS_DIR/$1.conf"; }
 mkcmd both "TARGET=dummy
