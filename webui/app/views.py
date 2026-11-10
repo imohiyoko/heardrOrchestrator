@@ -6,10 +6,10 @@ import re
 import shlex
 from urllib.parse import quote, unquote, urlencode
 
-from .config import DISPATCH, JOB_RE, REFRESH_SEC, SCHED_LOGS, STALL_MIN
+from .config import DISPATCH, HERDR_ROOT, JOB_RE, REFRESH_SEC, SCHED_LOGS, STALL_MIN
 from .sanitize import clean, e
 from .herdr import agent_key, agent_session, get_agents, read_agent, workspace_label
-from .data import NOTIFY_POLL_SEC, activity_for, db_conn, needs_human, parse_jsonl, q, stalled, tail_lines, tasks_for_agent, urgent_items
+from .data import NOTIFY_POLL_SEC, activity_for, agent_ops, agent_registry, stopped_agents, db_conn, needs_human, parse_jsonl, q, stalled, tail_lines, tasks_for_agent, urgent_items
 from .actions import NOTE_MAX
 from .jobs import DAY_PRESETS, DAY_TOKENS, job_info, job_last, job_names
 from . import docs
@@ -61,7 +61,7 @@ def page(title, body, path, badge, logout="", refresh=True, scripts=()):
         '<script src="/notify.js" defer></script>'
         + "".join(f'<script src="{e(src)}" defer></script>' for src in scripts) + "</head><body>"
         f"<nav>{''.join(links)}{logout}</nav><main><h1>{e(title)}</h1>{body}"
-        f'<p class=note>{f"自動更新 {REFRESH_SEC} 秒" if refresh else "入力欄があるので自動更新なし(再読み込みで更新)"} / 変更できるのは定期実行の設定と報告の「対応済み」だけ / 機密を含みうる画面です / Chrome 通知は「緊急通知」で設定</p></main></body></html>'
+        f'<p class=note>{f"自動更新 {REFRESH_SEC} 秒" if refresh else "入力欄があるので自動更新なし(再読み込みで更新)"} / 変更できるのは定期実行の設定・報告の「対応済み」・agent の停止 / 復活 / 作成だけ / 機密を含みうる画面です / Chrome 通知は「緊急通知」で設定</p></main></body></html>'
     )
 
 
@@ -127,8 +127,48 @@ def page_overview(_qs):
     return "概要", body
 
 
-def page_agents(_qs):
+KILL_LABEL = {"yes": "止めてよい", "no": "止めない", "unknown": "未判定", "stale": "判定が古い"}
+OP_MSG = {"done": "実行しました。", "pending": "人の承認待ちに積みました。", "refused": "前提を満たさないため実行しませんでした(下の「直近の操作」に理由)。",
+          "error": "実行に失敗しました(下の「直近の操作」か、手元の tb agent-ops を確認してください)。"}
+
+
+def op_form(ctx, op, name, label, confirm=False):
+    """agent 一覧の操作ボタン(POST /agent-op。書き込みは tb が行う)。confirm なら確認のチェックが要る。"""
+    chk = f'<label class=note><input type=checkbox name=confirm value=1 required>本当に{e(label)}</label> ' if confirm else ""
+    return (f'<form method=post action="/agent-op" style="display:inline"><input type=hidden name=csrf value="{e(ctx.get("csrf", ""))}">'
+            f'<input type=hidden name=op value="{e(op)}"><input type=hidden name=name value="{e(name)}">{chk}'
+            f'<button type=submit>{e(label)}</button></form>')
+
+
+def decide_form(ctx, lid):
+    tok = e(ctx.get("csrf", ""))
+    return "".join(
+        f'<form method=post action="/agent-op" style="display:inline"><input type=hidden name=csrf value="{tok}">'
+        f'<input type=hidden name=op value="{op}"><input type=hidden name=id value="{int(lid)}"><button type=submit>{label}</button></form> '
+        for op, label in (("approve", "承認して実行"), ("reject", "却下")))
+
+
+def killable_html(r):
+    if not r:
+        return '<span class=note>未判定</span>'
+    k = r.get("killable_now") or "unknown"
+    cls = {"yes": "st-done", "no": "st-idle", "stale": "warn"}.get(k, "note")
+    why = f'<br><span class=note>{e(r.get("killable_reason"))}({e(r.get("killable_by"))})</span>' if r.get("killable_reason") else ""
+    return f'<span class={cls}>{e(KILL_LABEL.get(k, k))}</span>{why}'
+
+
+def stop_cell(ctx, name, r):
+    if not ctx.get("csrf") or not name:
+        return ""
+    if r and r.get("killable_now") == "yes" and not r.get("open_tasks"):
+        return op_form(ctx, "stop", name, "停止")
+    return op_form(ctx, "force-stop", name, "強制停止", confirm=True)
+
+
+def page_agents(qs, ctx=None):
+    ctx = {} if ctx is None else ctx
     agents, err = get_agents()
+    reg = agent_registry()
     rows = []
     for a in agents:
         act = activity_for(a)
@@ -138,12 +178,59 @@ def page_agents(_qs):
             warn = "blocked(人の対応待ち)"
         elif stalled(a, act):
             warn = f"滞留 ({STALL_MIN} 分超)"
+        r = reg.get(a.get("name") or "")
         rows.append([
             alink(a), state_html(a.get("agent_status")), e(a.get("workspace_id")), cur_task_title(a, tasks),
             f'入力 {e(act.get("last_prompt_at") if act else "-")}<br>停止 {e(act.get("last_stop_at") if act else "-")}',
-            f'<span class=warn>{e(warn)}</span>' if warn else ""])
-    return "agent 一覧", err_html(err) + table(
-        ["名前", "状態", "workspace", "いま何を", "最終入力 / 停止", "警告"], rows)
+            f'<span class=warn>{e(warn)}</span>' if warn else "", killable_html(r), stop_cell(ctx, a.get("name"), r)])
+    st = (qs.get("op") or [""])[0]
+    body = (f"<p class=note>{e(OP_MSG[st])}</p>" if st in OP_MSG else "") + err_html(err) + table(
+        ["名前", "状態", "workspace", "いま何を", "最終入力 / 停止", "警告", "止めてよいか", "操作"], rows)
+    body += ('<p class=note>「止めてよいか」は判定役(roles/sweeper.md)か人が付けます。止めてよい印があり、未完了タスクが無いものは「停止」、'
+             'それ以外は確認つきの「強制停止」。止めても台帳に会話が残り、下から同じ会話で復活できます。 '
+             '<a href="/agent-new">新しい agent を作る</a></p>')
+    pend = agent_ops("pending", 50)
+    body += '<h2 id="ops">承認待ちの操作(agent からの依頼)</h2>' + table(
+        ["id", "依頼者", "操作", "対象", "内容", "時刻", ""],
+        [[f"L-{o['id']}", e(o["requested_by"]), e(o["op"]), e(o["target"]), f'<code>{e(o.get("args"))}</code>',
+          e(o["created_at"]), decide_form(ctx, o["id"]) if ctx.get("csrf") else ""] for o in pend])
+    stopped = stopped_agents()
+    body += "<h2>停止中の agent</h2>" + table(
+        ["名前", "止めた時刻", "会話 (session)", "cwd", "モデル / 役割", "操作"],
+        [[e(r["name"]), e(r.get("stopped_at")), f'<code>{e(r.get("session_id"))}</code>' if r.get("session_id") else "-",
+          e(r.get("cwd")), f'{e(r.get("model") or "-")} / {e(r.get("role") or "-")}',
+          ((op_form(ctx, "revive", r["name"], "同じ会話で復活") if r.get("session_id") else "") + " " +
+           op_form(ctx, "revive-fresh", r["name"], "新しい会話で復活")) if ctx.get("csrf") else ""] for r in stopped])
+    body += "<h2>直近の操作</h2>" + table(
+        ["id", "操作", "対象", "依頼者", "結果", "内容", "時刻"],
+        [[f"L-{o['id']}", e(o["op"]), e(o["target"]), e(o["requested_by"]), e(o["status"]), e(o.get("result")),
+          e(o.get("decided_at") or o["created_at"])] for o in agent_ops(None, 15)])
+    return "agent 一覧", body
+
+
+def page_agent_new(csrf, error="", form=None):
+    """新しい agent を作るフォーム(入力欄があるので自動更新しない)。"""
+    f = form or {}
+    roles_dir = os.path.join(HERDR_ROOT, "roles")
+    try:
+        roles = sorted(n[:-3] for n in os.listdir(roles_dir) if n.endswith(".md") and not n.startswith("_") and n != "README.md")
+    except OSError:
+        roles = []
+    opts = '<option value="">(名前と roles/map.conf で決める)</option>' + "".join(
+        f'<option value="{e(r)}"{" selected" if f.get("role") == r else ""}>{e(r)}</option>' for r in roles)
+    kopts = "".join(f'<option value="{v}"{" selected" if f.get("killable", "unknown") == v else ""}>{lab}</option>'
+                    for v, lab in (("unknown", "判定役に任せる"), ("yes", "止めてよい(使い捨て)"), ("no", "止めない(常駐)")))
+    body = err_html(error) + (
+        f'<form method=post action="/agent-new"><input type=hidden name=csrf value="{e(csrf)}">'
+        f'<p><label>名前(英小文字で始まる英小文字・数字・_・-、32 字以内)<br><input name=name required maxlength=32 pattern="[a-z][a-z0-9_-]{{0,31}}" value="{e(f.get("name", ""))}"></label></p>'
+        f'<p><label>作業ディレクトリ(空ならこのリポジトリ)<br><input name=cwd size=60 maxlength=1024 value="{e(f.get("cwd", ""))}"></label></p>'
+        f'<p><label>モデル(空なら Claude Code の既定。例: haiku / sonnet)<br><input name=model maxlength=64 value="{e(f.get("model", ""))}"></label></p>'
+        f'<p><label>役割<br><select name=role>{opts}</select></label></p>'
+        f'<p><label>止めてよいか<br><select name=killable>{kopts}</select></label></p>'
+        f'<p><label>最初の指示(任意)<br><textarea name=prompt rows=4 cols=60 maxlength=4000>{e(f.get("prompt", ""))}</textarea></label></p>'
+        '<button type=submit>作成する</button></form>'
+        '<p class=note>専用の workspace を作り、そこで claude を起動します(tb agent-new)。役割は起動時に SessionStart hook が渡します。</p>')
+    return "新しい agent", body
 
 
 def find_agent(key):
@@ -170,6 +257,7 @@ def page_agent(key):
         ("最終入力", e(act.get("last_prompt_at") if act else "-")),
         ("最終停止", e(act.get("last_stop_at") if act else "-")),
         ("session_id", f"<code>{e(sid)}</code>" if sid else "-"),
+        ("止めてよいか", killable_html(agent_registry().get(a.get("name") or "")) + ' <a href="/agents">停止・復活は agent 一覧から</a>'),
     ]
     body = err_html(err) + "<table>" + "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in info) + "</table>"
     attach = "herdr agent attach " + shlex.quote(str(agent_key(a)))
@@ -539,7 +627,7 @@ def _doc_body(text, ext, raw_mode, base_q, ctx):
     return f"<pre>{e(text)}</pre>"
 
 
-STATIC = {"/": page_overview, "/notifications": page_notifications, "/agents": page_agents, "/tasks": page_tasks, "/inbox": page_inbox,
+STATIC = {"/": page_overview, "/notifications": page_notifications, "/tasks": page_tasks, "/inbox": page_inbox,
           "/jobs": page_jobs, "/ledger": page_ledger}
 
 
@@ -550,6 +638,11 @@ def route(path, qs, ctx=None):
         path = path.rstrip("/")
     if path == "/inbox":
         return page_inbox(qs, ctx)
+    if path == "/agents":
+        return page_agents(qs, ctx)
+    if path == "/agent-new":
+        ctx["norefresh"] = True
+        return page_agent_new(ctx.get("csrf", ""))
     if path == "/docs":
         return page_docs(qs, ctx)
     if path == "/docs/view":

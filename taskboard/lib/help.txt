@@ -66,3 +66,16 @@ tb review-pack [--since ISO] [--mark]      生ログではなく集計と上位�
 tb proposal --role <roles のファイル|-> --title T (--text X|--text-file F)   改善提案を設定役へ送る
 tb proposals [P-<n>] [--status open|applied|rejected]
 tb proposal-resolve P-<n> --status applied|rejected [--note N]   設定役か人だけ
+
+agent の停止・復活・新規作成(台帳 agents。人の端末からはそのまま、agent の pane からは approvals の agent:<op>:<名前>):
+tb agents [--json] [--all]   台帳と判定材料(状態・killable・未完了タスク・未対応の質問・idle 分・役割)。herdr と同期する
+tb agent-new <名前> [--cwd D] [--model M] [--role R] [--prompt P] [--killable yes|no]
+         専用 workspace で claude を起動。--role は roles/<R>.md(台帳に残り、復活後も同じ役割)
+tb agent-stop <名前> [--force]   pane を閉じて止める。killable=yes(判定後に新しい入力なし)で未完了タスクが無いときだけ。
+         --force は人だけ。止める前に session と cwd を台帳に残す
+tb agent-revive <名前> [--fresh] [--model M] [--prompt P]   台帳の session を claude --resume で再開(--fresh なら新しい会話)
+tb agent-flag <名前> --killable yes|no|unknown [--reason R]   止めてよいかの判定。判定役(TB_SWEEPER_PATTERN、既定 sweeper*)か人だけ
+         終了コード(new/stop/revive): 0 実行済み 1 拒否・前提違い 11 herdr の失敗 20 人の承認待ち(L-<n>)
+tb agent-ops [--status pending|done|failed|rejected] [--json]   操作の記録と承認待ち
+tb agent-approve L-<n> [--always]   承認待ちの操作を実行(--always で agent:<op>:<名前> を allow)
+tb agent-reject L-<n>

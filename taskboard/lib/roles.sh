@@ -13,6 +13,9 @@ role_file_for() {  # $1=agent 名 → 役割ファイルのパス(無ければ�
   local name=$1 k v pat
   [[ $name =~ ^[A-Za-z0-9._-]{1,64}$ && $name != _* && $name != README ]] || return 0
   if [[ -f $ROLES_DIR/$name.md ]]; then printf '%s' "$ROLES_DIR/$name.md"; return 0; fi
+  # tb agent-new --role で決めた役割(台帳 agents.role)
+  local reg; reg=$(sql "SELECT COALESCE(role,'') FROM agents WHERE name=$(q "$name");" 2>/dev/null) || reg=""
+  if [[ $reg =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && -f $ROLES_DIR/$reg.md ]]; then printf '%s' "$ROLES_DIR/$reg.md"; return 0; fi
   [[ -f $ROLES_DIR/map.conf ]] || return 0
   while IFS='=' read -r k v || [[ -n $k ]]; do
     pat=$(trim "${k%%#*}"); v=$(trim "${v%%#*}")
@@ -43,6 +46,13 @@ last_briefed_hash() {  # $1=session_id
 record_briefing() {  # session agent file hash source via
   sql "INSERT INTO role_briefings (session_id, agent, role_file, hash, source, via, created_at)
     VALUES ($(q "$1"), $(q "$2"), NULLIF($(q "$3"),''), $(q "$4"), $(q "$5"), $(q "$6"), $(q "$(now)"));" >/dev/null
+}
+
+# 人か agent かの判定用: 一覧を取れなければ 1(「名前が無い」= 人の pane と区別する)
+pane_owner_name() {  # $1=pane → 名前(無ければ空)
+  local out
+  out=$(herdr_call agent list 2>/dev/null) || return 1
+  jq -r --arg p "$1" '[.result.agents[]? | select(.pane_id==$p)][0].name // empty' <<<"$out" 2>/dev/null || return 1
 }
 
 agent_name_by_pane() {  # $1=pane → 名前(無ければ空)

@@ -128,7 +128,7 @@ def req(port, method, path, cookie=None, host=None):
 os.makedirs(os.path.join(TMP, "fake"))
 XSS = "<script>alert(1)</script>"
 agents = {"id": "x", "result": {"agents": [
-    {"name": "alpha", "agent": "claude", "agent_status": "working", "pane_id": "w1:p1", "workspace_id": "w1",
+    {"name": "alpha", "agent": "claude", "agent_status": "working", "pane_id": "w1:p1", "workspace_id": "w1", "cwd": TMP,
      "agent_session": {"kind": "id", "value": "11111111-2222-3333-4444-555555555555"},
      "terminal_title_stripped": "title " + XSS},
     {"name": "<img src=x onerror=alert(2)>", "agent": "claude", "agent_status": "blocked", "pane_id": "w1:p2",
@@ -546,6 +546,76 @@ check("2 回目は already、戻り先は自サイトだけ", r[0] == 302 and r[
 r = cl.raw("POST", "/resolve", {"id": "999", "back": "/tasks/T-1", "csrf": cl.csrf("/inbox")})
 check("存在しない報告は error", r[0] == 302 and r[1].get("Location") == "/tasks/T-1?resolved=error", str(r[:2]))
 
+# ---- agent の停止・復活・新規作成(/agent-op /agent-new。書き込みは tb agent-* が行う)
+FLOG = os.path.join(TMP, "fake", "log")
+
+
+def flog():
+    return open(FLOG).read() if os.path.exists(FLOG) else ""
+
+
+def regdb(sql, args=()):
+    c = sqlite3.connect(env["WEBUI_TB_DB"])
+    try:
+        r = c.execute(sql, args).fetchall()
+        c.commit()
+        return r
+    finally:
+        c.close()
+
+
+ag = cl.get("/agents")[2]
+check("agent 一覧に停止のボタンと新規作成へのリンク", 'action="/agent-op"' in ag and 'href="/agent-new"' in ag)
+check("未判定・未完了タスクありは確認つきの強制停止", 'value="force-stop"' in ag and "name=confirm" in ag and 'value="stop"' not in ag)
+good_op = {"op": "force-stop", "name": "alpha", "confirm": "1"}
+check("CSRF 無しの /agent-op は拒否", cl.raw("POST", "/agent-op", good_op)[0] == 403)
+check("Origin 不一致の /agent-op は拒否", cl.raw("POST", "/agent-op", {**good_op, "csrf": cl.csrf("/agents")}, origin="http://evil.example")[0] == 403)
+check("未ログインの /agent-op は /login へ", Client(port).raw("POST", "/agent-op", good_op)[0] == 302)
+check("名前が不正なら 400", cl.raw("POST", "/agent-op", {**good_op, "name": "a;b", "csrf": cl.csrf("/agents")})[0] == 400)
+check("不明な op は 400", cl.raw("POST", "/agent-op", {**good_op, "op": "rm", "csrf": cl.csrf("/agents")})[0] == 400)
+r = cl.raw("POST", "/agent-op", {"op": "stop", "name": "alpha", "csrf": cl.csrf("/agents")})
+check("印の無い agent の通常停止は断る", r[0] == 302 and r[1].get("Location") == "/agents?op=refused" and "pane close" not in flog(), str(r[:2]))
+r = cl.raw("POST", "/agent-op", {"op": "force-stop", "name": "alpha", "csrf": cl.csrf("/agents")})
+check("強制停止は確認のチェックが要る", r[0] == 302 and r[1].get("Location") == "/agents?op=refused" and "pane close" not in flog())
+r = cl.raw("POST", "/agent-op", {**good_op, "csrf": cl.csrf("/agents")})
+check("強制停止で pane を閉じる", r[0] == 302 and r[1].get("Location") == "/agents?op=done" and "pane close w1:p1" in flog(), str(r[:2]) + flog())
+check("台帳に会話が残る", regdb("SELECT state, session_id FROM agents WHERE name='alpha'") == [("stopped", "11111111-2222-3333-4444-555555555555")])
+time.sleep(3.2)  # agent list のキャッシュ切れを待つ
+ag = cl.get("/agents?op=done")[2]
+check("結果の表示と、停止中の一覧・復活ボタン", "実行しました" in ag and "停止中の agent" in ag and 'value="revive"' in ag and 'value="revive-fresh"' in ag)
+check("直近の操作に human の記録", "alpha" in ag and "human" in ag)
+r = cl.raw("POST", "/agent-op", {"op": "revive", "name": "alpha", "csrf": cl.csrf("/agents")})
+check("同じ会話で復活(claude --resume)", r[0] == 302 and r[1].get("Location") == "/agents?op=done"
+      and "agent start alpha --kind claude --pane w9:p1 -- --resume 11111111-2222-3333-4444-555555555555" in flog(), str(r[:2]) + flog())
+nw = cl.get("/agent-new")
+check("新規作成フォーム(自動更新なし・役割の候補)", nw[0] == 200 and 'action="/agent-new"' in nw[2] and 'http-equiv="refresh"' not in nw[2]
+      and '<option value="worker">' in nw[2] and '<option value="_common">' not in nw[2])
+check("CSRF 無しの /agent-new は拒否", cl.raw("POST", "/agent-new", {"name": "newbie"})[0] == 403)
+r = cl.raw("POST", "/agent-new", {"name": "Bad<b>", "csrf": cl.csrf("/agent-new")})
+check("不正な名前はフォームに戻してエラー(エスケープ)", r[0] == 400 and "英小文字" in r[2] and "Bad&lt;b&gt;" in r[2] and "Bad<b>" not in r[2])
+r = cl.raw("POST", "/agent-new", {"name": "newbie", "cwd": "relative/dir", "csrf": cl.csrf("/agent-new")})
+check("相対パスの cwd は断る", r[0] == 400 and "絶対パス" in r[2])
+r = cl.raw("POST", "/agent-new", {"name": "newbie", "cwd": "/no/such/dir", "csrf": cl.csrf("/agent-new")})
+check("存在しない cwd は tb のエラーを見せる", r[0] == 400 and "ディレクトリがありません" in r[2], r[2][-400:])
+r = cl.raw("POST", "/agent-new", {"name": "newbie", "cwd": TMP, "model": "haiku", "role": "worker", "killable": "yes",
+                                  "prompt": "最初の指示", "csrf": cl.csrf("/agent-new")})
+check("新しい agent を作る", r[0] == 302 and r[1].get("Location") == "/agents?op=done"
+      and "--label newbie" in flog() and "agent start newbie --kind claude --pane w9:p1 -- --model haiku" in flog()
+      and "agent prompt newbie [from: tb / agent / human] 最初の指示" in flog(), str(r[:2]) + flog())
+check("台帳に役割と印", regdb("SELECT role, killable, created_by FROM agents WHERE name='newbie'") == [("worker", "yes", "human")])
+regdb("INSERT INTO agent_ops (op, target, args, requested_by, status, created_at) VALUES ('new','helper','{\"cwd\":\"" + TMP + "\"}','conductor','pending','2026-11-10T00:00:00Z')")
+lid = regdb("SELECT max(id) FROM agent_ops")[0][0]
+time.sleep(3.2)
+ag = cl.get("/agents")[2]
+check("承認待ちの操作に承認・却下のボタン", f'name=id value="{lid}"' in ag and 'value="approve"' in ag and 'value="reject"' in ag)
+check("緊急通知にも出る", f"l:{lid}" in [it["id"] for it in json.loads(cl.get("/api/notifications")[2])["items"]])
+check("id が数字でなければ 400", cl.raw("POST", "/agent-op", {"op": "approve", "id": "1;x", "csrf": cl.csrf("/agents")})[0] == 400)
+r = cl.raw("POST", "/agent-op", {"op": "approve", "id": str(lid), "csrf": cl.csrf("/agents")})
+check("承認すると実行する", r[0] == 302 and r[1].get("Location") == "/agents?op=done" and "--label helper" in flog(), str(r[:2]))
+check("記録は依頼者のまま done", regdb("SELECT status, requested_by FROM agent_ops WHERE id=?", (lid,)) == [("done", "conductor")])
+r = cl.raw("POST", "/agent-op", {"op": "reject", "id": str(lid), "csrf": cl.csrf("/agents")})
+check("済んだものは却下できない", r[0] == 302 and r[1].get("Location") == "/agents?op=refused", str(r[:2]))
+os.remove(os.path.join(TMP, "fake", "closed"))
 # ---- ドキュメント(agent が成果物として報告したローカルのファイル)
 DOCS = os.path.join(d, "work")
 os.makedirs(os.path.join(DOCS, "out", "sub"), exist_ok=True)

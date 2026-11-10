@@ -63,19 +63,13 @@ alert_dispatch_one() {  # $1=alerts.id(数字)
 }
 
 start_analyst() {  # $1=alerts.id
-  local id=$1 name="analyst-A$1" cwd pane out prompt
+  local id=$1 name="analyst-A$1" cwd prompt i
   cwd=$(cd "$ANALYST_CWD" 2>/dev/null && pwd) || { sql "UPDATE alerts SET status='queued', note='TB_ANALYST_CWD が無い' WHERE id=$id;"; return 11; }
-  if ! out=$(herdr_call workspace create --cwd "$cwd" --label "$name" --no-focus 2>&1) \
-     || ! pane=$(jq -er '.result.root_pane.pane_id' <<<"$out" 2>/dev/null); then
-    sql "UPDATE alerts SET status='queued', note='workspace を作れない' WHERE id=$id;"; return 11
+  local -a extra=(); [[ -n $ANALYST_MODEL ]] && extra=(--model "$ANALYST_MODEL")
+  if ! TB_SPAWN_RETRY_SEC=${TB_ANALYST_RETRY_SEC:-3} herdr_spawn "$name" "$cwd" ${extra[@]+"${extra[@]}"}; then
+    sql "UPDATE alerts SET status='queued', note=$(q "$SPAWN_ERR") WHERE id=$id;"; return 11
   fi
-  local -a extra=(); [[ -n $ANALYST_MODEL ]] && extra=(-- --model "$ANALYST_MODEL")
-  local i ok=0
-  for i in 1 2 3; do   # シェル初期化が遅いと最初の start が失敗する(herdr-up.sh と同じ)
-    if herdr_call agent start "$name" --kind claude --pane "$pane" ${extra[@]+"${extra[@]}"} >/dev/null 2>&1; then ok=1; break; fi
-    sleep "${TB_ANALYST_RETRY_SEC:-3}"
-  done
-  ((ok)) || { sql "UPDATE alerts SET status='queued', note='agent を起動できない' WHERE id=$id;"; return 11; }
+  agent_register "$name" "$cwd" "$ANALYST_MODEL" "" tb >/dev/null 2>&1 || true
   sql "UPDATE alerts SET status='analyzing', analyst=$(q "$name"), analysis_started_at=$(q "$(now)"), note=NULL WHERE id=$id;"
   prompt="[from: tb / alert / A-$id / task] あなたはアラート A-$id の解析役です(役割は roles/analyst.md)。まず tb alerts A-$id で全文を読み、原因の仮説・根拠・影響範囲・推奨対応をまとめ、緊急度を決めて、tb alert-result A-$id --severity critical|high|medium|low --summary '<要約>' --report <報告ファイル> で返してください。"
   # 起動直後は idle になるまで少し待つ(herdr_send は idle/done でしか送らない)
@@ -130,6 +124,11 @@ cmd_alert-result() {
   sql "UPDATE alerts SET status='analyzed', severity=$(q "$sev"), result_summary=$(q "$summary"), result_report=NULLIF($(q "$rtext"),''),
          result_path=NULLIF($(q "$report"),''), result_by=$(q "$by"), analyzed_at=$(q "$(now)") WHERE id=$id;"
   alert_deliver "$id" >/dev/null 2>&1 || true
+  # 解析役は結果を返したら用済み: 止めてよい印を付ける(停止は tb agent-stop。人か、承認された指揮官が行う)
+  if [[ $by != human ]]; then
+    sql "UPDATE agents SET killable='yes', killable_reason=$(q "A-$id の解析結果を返した"), killable_by='tb', killable_at=$(q "$(now)"),
+           killable_session=session_id WHERE name=$(q "$by");" >/dev/null 2>&1 || true
+  fi
   cmd_alert-dispatch >/dev/null 2>&1 || true   # 枠が空いたので待ちを進める
   echo "A-$id analyzed"
 }

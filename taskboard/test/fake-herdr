@@ -20,9 +20,14 @@ case "$1 $2" in
   "workspace create")
     echo "workspace-create $*" >>"${FAKE_LOG:?}"
     [[ ${FAKE_WS_FAIL:-0} == 1 ]] && { echo '{"error":{"code":"x"}}'; exit 1; }
-    echo '{"result":{"root_pane":{"pane_id":"wA:p1"}}}';;
+    echo "{\"result\":{\"workspace\":{\"workspace_id\":\"wN\"},\"root_pane\":{\"pane_id\":\"${FAKE_NEW_PANE:-wA:p1}\"}}}";;
+  "workspace close")
+    echo "workspace-close $3" >>"${FAKE_LOG:?}";;
+  "pane close")
+    echo "pane-close $3" >>"${FAKE_LOG:?}"
+    exit "${FAKE_CLOSE_RC:-0}";;
   "agent start")
-    printf 'start %s\n' "$3" >>"${FAKE_LOG:?}"
+    printf 'start %s\n' "${*:3}" >>"${FAKE_LOG:?}"
     exit "${FAKE_START_RC:-0}";;
   *) echo "fake-herdr: unsupported: $*" >&2; exit 99;;
 esac

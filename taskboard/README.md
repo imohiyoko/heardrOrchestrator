@@ -186,9 +186,39 @@ tb alert-close A-<n>                # 人が閉じる
   作業ディレクトリは `TB_ANALYST_CWD`(既定このリポジトリ)、モデルは `TB_ANALYST_MODEL`(既定は Claude Code の既定)
 - 結果はすぐ指揮官に送る。使用中なら `tb digest` が回収する。新しいアラートも digest に入る。critical / high の解析結果と起動待ちは Web UI の緊急通知に出る
 - 状態: `new` → (`awaiting-approval` → `approved`)→ (`queued`)→ `analyzing` → `analyzed` → `closed`
-- 解析役の pane / workspace は自動では閉じない(結果を確かめてから人が閉じる)
+- 解析役の pane / workspace は自動では閉じない。結果を返すと tb が killable=yes を付けるので、人(Web UI の agent 一覧)か承認された指揮官が `tb agent-stop analyst-A<n>` で止める
 
 `tb system-send <宛先> --text T --job J` は scheduler(`tick.sh`)用。agent の pane からは使えない。送ったものは `messages` に `kind=scheduler` で残る。
+
+## agent の停止・復活・新規作成(agents)
+
+`/mcp` や herdr を手で触らずに、agent を止める・同じ会話から復活させる・新しく作る。台帳は `agents` テーブルで、
+`tb agents` を呼ぶたびに `herdr agent list` と突き合わせる(tb 以外で起動・終了したものも拾う)。
+
+```bash
+tb agents [--json] [--all]          # 台帳と判定材料: 状態・killable・未完了タスク数・未対応の質問数・idle 分・役割ファイル
+tb agent-new <名前> [--cwd D] [--model M] [--role R] [--prompt P] [--killable yes|no]
+tb agent-stop <名前> [--force]
+tb agent-revive <名前> [--fresh] [--model M] [--prompt P]
+tb agent-flag <名前> --killable yes|no|unknown [--reason R]   # 判定役(sweeper*)か人だけ
+tb agent-ops [--status pending|done|failed|rejected] [--json]
+tb agent-approve L-<n> [--always] / tb agent-reject L-<n>      # 人だけ
+```
+
+- **新規作成**: 専用の workspace(label = 名前)を作り、その pane で `herdr agent start <名前> --kind claude [-- --model M]`。
+  `--cwd` の既定は `TB_AGENT_CWD`(既定このリポジトリ)。`--role R` は `roles/R.md` を台帳に残し、SessionStart hook がそれを渡す(復活後も同じ)。
+  `--prompt` は起動後に最初の指示として送る
+- **停止**: その agent の pane を `herdr pane close` で閉じる(herdr に agent 単体の停止は無い)。止める前に session と cwd(hook の記録を優先)を台帳に残す。
+  止められるのは **killable=yes で、未完了(in_progress / review / blocked)のタスクを持っていない**ときだけ。人は `--force` で例外にできる。自分自身は止められない
+- **復活**: 台帳の cwd で新しい workspace を作り、`claude --resume <session>` で同じ会話から再開する。`--fresh` なら新しい会話。
+  モデルは台帳の値か `--model`。復活したら判定フラグは `unknown` に戻る
+- **判定フラグ(killable)**: `yes|no|unknown`。付けられるのは判定役(`roles/sweeper.md`、軽いモデル。`TB_SWEEPER_PATTERN`、既定 `sweeper*`)と人だけ。
+  yes を付けた後でその agent が新しい入力を受けたら、または会話が変わったら `stale` になり、停止には使えない(付け直しが要る)。
+  解析役(`analyst-A<n>`)は `tb alert-result` を返した時点で tb が yes を付ける。判定役の定期実行は `scheduler/jobs/sweeper.conf.example`
+- **誰が実行できるか**: 人の端末(と Web UI)からはそのまま実行する。agent の pane からは `approvals.conf` の `agent:<op>:<名前>`(op は `new|stop|revive`、既定 `agent:* = ask`)を見て、
+  `ask` なら `L-<n>` として人の承認待ちに積む(終了コード 20。Web UI の緊急通知と agent 一覧に出る)。`allow` ならそのまま実行する(停止の前提はそれでも確かめる)。`--force` は人だけ
+- herdr のセッション(`HERDR_SESSION`、プリセットの `# session:`)ごとに台帳を分けて扱う。別セッションの agent は同期で「止まった」扱いにせず、操作するときは `HERDR_SESSION=<名前>` を付けるよう案内する
+- 実行したもの・断ったもの・承認待ちは `agent_ops` にすべて残る。終了コード: 0 実行済み / 1 拒否・前提違い / 11 herdr の失敗 / 20 承認待ち
 
 ## 会計役(定期レビュー)と改善提案
 
@@ -240,7 +270,7 @@ tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわ�
 | `lib/core.sh` | エラー終了・入力の検査・タスク行の取得・project ごとの指示役 |
 | `lib/transport.sh` | herdr との境界。herdr を実行するのはここの `herdr_call` だけ。送信と `messages` への記録(`herdr_send`)、`system-send` |
 | `lib/tasks.sh` | add / list / show / claim / update / done / block / report / pending |
-| `lib/proxy.sh` / `activity.sh` / `comments.sh` / `digest.sh` / `send.sh` / `roles.sh` / `approvals.sh` / `alerts.sh` / `review.sh` | 各節のコマンド |
+| `lib/proxy.sh` / `activity.sh` / `comments.sh` / `digest.sh` / `send.sh` / `roles.sh` / `approvals.sh` / `alerts.sh` / `review.sh` / `agents.sh` | 各節のコマンド |
 
 agent への送信も DB への書き込みも、すべて `tb` を通る。後で MCP サーバーなど別の経路を足すときは、`tb` のコマンドを呼ぶか `lib/transport.sh` を差し替えればよい。
 
@@ -255,7 +285,7 @@ agent への送信も DB への書き込みも、すべて `tb` を通る。後�
 `effect` は `read-only|write|external`、`status` は `open|done|pending-human|denied`。
 `comments(id, task_id, kind, text, deliverables, from_name, from_pane, from_session, delivered_at, created_at)`
 `agent_activity(session_id PK, pane_id, tab_id, workspace_id, cwd, last_prompt_id, last_prompt_at, last_stop_at, updated_at)`
-`messages(id, kind, ref, target, body, result, created_at)` / `alerts(id, fingerprint, severity, title, body, source, source_pane, status, count, analyst, note, result_*, first_seen, last_seen, analysis_started_at, analyzed_at, closed_at)` / `proposals(id, role_file, title, text, status, by_name, note, delivered_at, resolved_at, created_at)` / `reviews(id, since_at, until_at, created_at)` / `approval_changes(id, pattern, value, created_at)` / `role_briefings(id, session_id, agent, role_file, hash, source, via, created_at)` / `outbox(id, from_name, from_pane, from_session, target, kind, task_id, text, status, reason, sent_at, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)`
+`messages(id, kind, ref, target, body, result, created_at)` / `alerts(id, fingerprint, severity, title, body, source, source_pane, status, count, analyst, note, result_*, first_seen, last_seen, analysis_started_at, analyzed_at, closed_at)` / `proposals(id, role_file, title, text, status, by_name, note, delivered_at, resolved_at, created_at)` / `reviews(id, since_at, until_at, created_at)` / `approval_changes(id, pattern, value, created_at)` / `role_briefings(id, session_id, agent, role_file, hash, source, via, created_at)` / `outbox(id, from_name, from_pane, from_session, target, kind, task_id, text, status, reason, sent_at, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)` / `agents(name PK, kind, cwd, model, role, session_id, pane_id, herdr_session, state, killable, killable_reason, killable_by, killable_at, killable_session, created_by, created_at, updated_at, stopped_at)` / `agent_ops(id, op, target, args, requested_by, status, result, created_at, decided_at)`
 `tasks.status` は `todo|in_progress|review|done|blocked`。`summary`(done の要約)と `note`(block の理由)は設計メモの最小案への追加。
 時刻は UTC の ISO 8601。
 
@@ -263,7 +293,7 @@ agent への送信も DB への書き込みも、すべて `tb` を通る。後�
 
 `TB_DB`(DB パス) / `TB_CONFIG`(projects.conf) / `HERDR_BIN`(herdr の実体。既定 `herdr`) / `TB_SCHEMA_DIR`(テスト用)
 DB パスと herdr の既定値は部品で共通の [`lib/herdr-env.sh`](../lib/herdr-env.sh)(Python は `lib/herdr_env.py`)で決まる。
-`TB_ROUTES`(routes.conf) / `TB_HR_NAME`(hr) / `TB_SCHED_LOGS` / `TB_REVIEW_TOP`(8) / `TB_ANALYST_MAX`(2) / `TB_ANALYST_CWD` / `TB_ANALYST_MODEL` / `TB_APPROVALS`(approvals.conf) / `TB_ROLES`(roles/) / `TB_ROLE_MAX`(12000) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
+`TB_ROUTES`(routes.conf) / `TB_HR_NAME`(hr) / `TB_SCHED_LOGS` / `TB_REVIEW_TOP`(8) / `TB_ANALYST_MAX`(2) / `TB_ANALYST_CWD` / `TB_ANALYST_MODEL` / `TB_AGENT_CWD` / `TB_SWEEPER_PATTERN`(`sweeper*`) / `TB_SPAWN_RETRY_SEC`(3) / `TB_APPROVALS`(approvals.conf) / `TB_ROLES`(roles/) / `TB_ROLE_MAX`(12000) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
 
 ## テスト
 

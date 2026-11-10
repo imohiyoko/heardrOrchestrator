@@ -127,6 +127,31 @@ def tasks_for_agent(a):
     return rows
 
 
+# 止めてよいかの実効値(tb の killable_of と同じ判定): 判定後に新しい入力があった・会話が変わったら stale
+KILLABLE_SQL = """SELECT a.*, CASE WHEN a.killable!='yes' THEN a.killable
+      WHEN a.killable_session IS NOT NULL AND a.session_id IS NOT NULL AND a.killable_session!=a.session_id THEN 'stale'
+      WHEN EXISTS (SELECT 1 FROM agent_activity aa WHERE (aa.session_id=a.session_id OR aa.pane_id=a.pane_id)
+                   AND julianday(aa.last_prompt_at) > julianday(a.killable_at)) THEN 'stale'
+      ELSE 'yes' END AS killable_now,
+    (SELECT COUNT(*) FROM tasks t WHERE t.owner_agent=a.name AND t.status IN ('in_progress','review','blocked')) AS open_tasks
+    FROM agents a"""
+
+
+def agent_registry():
+    """tb の台帳(agents)。{名前: 行}。スキーマ 004 より前の DB では空。"""
+    return {r["name"]: r for r in q(KILLABLE_SQL + " ORDER BY a.name")}
+
+
+def stopped_agents():
+    return q(KILLABLE_SQL + " WHERE a.state='stopped' ORDER BY a.stopped_at DESC LIMIT 50")
+
+
+def agent_ops(status=None, limit=20):
+    if status:
+        return q("SELECT * FROM agent_ops WHERE status=? ORDER BY id DESC LIMIT ?", (status, limit))
+    return q("SELECT * FROM agent_ops ORDER BY id DESC LIMIT ?", (limit,))
+
+
 NOTIFY_POLL_SEC = 15
 NOTIFY_MAX = 100
 
@@ -186,6 +211,11 @@ def urgent_items():
                           "title": _short(f"O-{o['id']} {o['from_name']} → {o['target']} ({o['kind']})", 80),
                           "body": _short(f"{o['text']} / 手元で tb approve O-{o['id']}(今後も許可なら --always)か tb reject O-{o['id']}"),
                           "href": "/notifications", "ts": clean(o.get("created_at") or "")})
+        for o in agent_ops("pending", NOTIFY_MAX):
+            items.append({"id": f"l:{o['id']}", "kind": "agent_op_pending", "label": "agent 操作の承認待ち",
+                          "title": _short(f"L-{o['id']} {o['requested_by']} → {o['op']} {o['target']}", 80),
+                          "body": _short(f"{o.get('args') or ''} / agent 一覧で承認・却下(手元なら tb agent-approve L-{o['id']})"),
+                          "href": "/agents#ops", "ts": clean(o.get("created_at") or "")})
         agents, _ = get_agents()
         for a in blocked:
             k = agent_key(a)

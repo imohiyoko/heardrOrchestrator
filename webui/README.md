@@ -7,8 +7,10 @@ Python 3 の標準ライブラリだけで動く(依存なし)。Mermaid の図�
 - 全ページに共通ナビと、承認待ち件数のバッジ(報告の question/blocked + `pending-human` の代行依頼 + blocked の agent)。
 - まとめ送信(10 分おき)より急ぐものは「緊急通知」(`/notifications`)に集め、ナビにも件数バッジを出す。
   Web UI のタブが開いていれば、新しく出たものを Chrome のデスクトップ通知でも出す(下の「緊急通知」)。
-- **変更できるのは定期実行のスケジュール**(`/jobs/<job>`: 間隔・時間帯・曜日・一時停止)と、**question / blocked の報告を「対応済みにする」**(`/inbox` とタスク画面。書き込みは `tb resolve` が行い、tasks.db には直接書かない)**だけ**。それ以外は読み取り専用で、POST/PUT/DELETE/PATCH は 405。入力欄のある画面は自動更新しない。
-  承認ボタンはない(承認は人が別の経路で行う)。
+- **変更できるのは定期実行のスケジュール**(`/jobs/<job>`: 間隔・時間帯・曜日・一時停止)と、**question / blocked の報告を「対応済みにする」**(`/inbox` とタスク画面。書き込みは `tb resolve` が行い、tasks.db には直接書かない)、
+  **agent の停止・復活・新規作成**(`/agents` と `/agent-new`。書き込みと herdr の操作は `tb agent-stop` / `agent-revive` / `agent-new` / `agent-approve` / `agent-reject` が行う。下の「agent の操作」)**だけ**。
+  それ以外は読み取り専用で、POST/PUT/DELETE/PATCH は 405。入力欄のある画面は自動更新しない。
+  agent の承認ダイアログに答えるボタンはない(承認は人が手元の端末で行う)。
 
 ## 起動
 
@@ -75,7 +77,7 @@ rm webui/run/auth.json webui/run/sessions.json
 - `sessions.json`: セッション値の SHA-256 と有効期限だけ。Cookie の値そのものは保存しない。
 - Cookie は `HttpOnly; SameSite=Strict; Path=/`。
 
-POST を受け付けるのは `/login`・`/setup`・`/logout`・`/reset`・`/jobs/<job>`・`/resolve` だけ(`/jobs/<job>` と `/resolve` はログイン中のセッションに結びついたトークンが必要)。これらは `Origin`/`Referer` が自分のオリジン
+POST を受け付けるのは `/login`・`/setup`・`/logout`・`/reset`・`/jobs/<job>`・`/resolve`・`/agent-op`・`/agent-new` だけ(`/jobs/<job>`・`/resolve`・`/agent-op`・`/agent-new` はログイン中のセッションに結びついたトークンが必要)。これらは `Origin`/`Referer` が自分のオリジン
 (`127.0.0.1:<port>`)であることと、フォームの隠しトークン(署名付き・30 分で失効)を確認する。それ以外の
 POST/PUT/DELETE/PATCH は 405。
 
@@ -92,7 +94,8 @@ POST/PUT/DELETE/PATCH は 405。
 | `/` | 概要(承認待ち、agent の状態、滞留、直近の完了) |
 | `/notifications` | 緊急通知の一覧と、Chrome 通知を有効にするボタン |
 | `/api/notifications` | 緊急通知の JSON(`/notify.js` が 15 秒ごとに取得。未ログインは 401) |
-| `/agents` | agent 一覧(状態・workspace・いま何を・最終入力/停止・警告) |
+| `/agents` | agent 一覧(状態・workspace・いま何を・最終入力/停止・警告・止めてよいか・停止ボタン)、承認待ちの agent 操作、停止中の agent(復活ボタン)、直近の操作 |
+| `/agent-new` | 新しい agent を作るフォーム(名前・作業ディレクトリ・モデル・役割・止めてよいか・最初の指示) |
 | `/agents/<名前>` | 状態、担当タスク、直近の出力(`herdr agent read`)、最終入力/停止、`session_id`、手元で開く `herdr agent attach`(`claude --resume` は会話が枝分かれするので出さない) |
 | `/tasks`, `/tasks/<id>` | タスク一覧(`?project=` `?status=` で絞り込み)と詳細(報告・成果物・代行依頼) |
 | `/inbox` | 要対応(question・blocked・pending-human・blocked の agent)を上に、直近の報告を下に |
@@ -238,3 +241,16 @@ herdr は `tests/fake/herdr`(疑似)、DB・ログは一時ディレクトリ。
 ## まだできていないこと
 
 ブラウザからの承認操作、端末リンク(ttyd は採用しない)、`pane_agent_status_changed` の購読(いまは数秒おきの取得)は第 2 段以降。
+
+## agent の操作(停止・復活・新規作成)
+
+`/agents` から、`/mcp` や herdr を手で触らずに agent を止める・復活させる・作る。Web UI からの操作は人の操作として扱い
+(`HERDR_PANE_ID` を外して `tb` を呼ぶ)、実体は `tb agent-*` が行う(詳細は `taskboard/README.md` の「agent の停止・復活・新規作成」)。
+
+- **停止**: 判定役(`roles/sweeper.md`)か人が「止めてよい」印を付け、未完了タスクが無い agent には「停止」ボタン。
+  それ以外は「強制停止」で、確認のチェックを入れないと送れない。止めても台帳に会話(session)と cwd が残る
+- **復活**: 「停止中の agent」から「同じ会話で復活」(`claude --resume <session>`)か「新しい会話で復活」
+- **新規作成**: `/agent-new`。専用の workspace で claude を起動する。役割は `roles/` から選べ、起動時に SessionStart hook が渡す
+- **承認待ちの操作**: agent(指揮官など)が `tb agent-*` を使い、`approvals.conf` の `agent:<op>:<名前>` が `ask` だったものは
+  「承認待ちの操作」に出る(緊急通知にも出る)。「承認して実行」か「却下」
+- 結果は画面上部(実行した / 承認待ちに積んだ / 前提を満たさない / 失敗)と、「直近の操作」(`agent_ops`)に出る

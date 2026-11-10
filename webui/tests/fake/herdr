@@ -1,10 +1,19 @@
 #!/bin/bash
-# テスト用の疑似 herdr。FAKE_HERDR_DIR の list.json / read.txt を返すだけ。
+# テスト用の疑似 herdr。FAKE_HERDR_DIR の list.json / read.txt を返す。
+# agent の操作(tb agent-*)用に workspace create / agent start / pane close / agent get / agent prompt も受け、$d/log に残す。
+# pane close した pane は $d/closed に足し、以後の agent list から消える
 d="${FAKE_HERDR_DIR:?}"
 [ -f "$d/fail" ] && { echo "boom" >&2; exit 3; }
 case "$1 $2" in
-  "agent list") cat "$d/list.json" ;;
+  "agent list")
+    if [ -f "$d/closed" ]; then jq -c --rawfile c "$d/closed" '($c | split("\n")) as $x | .result.agents |= map(select(.pane_id as $p | $x | index($p) | not))' "$d/list.json"
+    else cat "$d/list.json"; fi ;;
   "agent read") if [ "$3" = "w1:p2" ] && [ -f "$d/dialog.txt" ]; then cat "$d/dialog.txt"; else cat "$d/read.txt"; fi ;;
   "workspace list") echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"ws-label"}]}}' ;;
+  "workspace create") echo "workspace create $*" >>"$d/log"; echo '{"result":{"workspace":{"workspace_id":"w9"},"root_pane":{"pane_id":"w9:p1"}}}' ;;
+  "agent start") echo "agent start ${*:3}" >>"$d/log" ;;
+  "pane close") echo "pane close $3" >>"$d/log"; echo "$3" >>"$d/closed" ;;
+  "agent get") echo '{"result":{"agent":{"agent_status":"idle"}}}' ;;
+  "agent prompt") echo "agent prompt $3 $4" >>"$d/log"; echo '{"result":{"type":"ok"}}' ;;
   *) echo "fake herdr: unsupported: $*" >&2; exit 2 ;;
 esac
