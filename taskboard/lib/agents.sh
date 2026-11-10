@@ -173,7 +173,7 @@ do_agent_stop() {  # name force by
   sql "UPDATE agents SET state='stopped', stopped_at=$(q "$(now)"), updated_at=$(q "$(now)"), pane_id=NULL,
          session_id=COALESCE(NULLIF($(q "$sess"),''), session_id) WHERE name=$(q "$name");"
   sess=$(sql "SELECT COALESCE(session_id,'') FROM agents WHERE name=$(q "$name");")
-  OP_OUT="$name stopped${sess:+ (session $sess。tb agent-revive $name で同じ会話から再開できます)}"
+  OP_OUT="$name stopped${sess:+ (session ${sess}。tb agent-revive $name で同じ会話から再開できます)}"
 }
 
 do_agent_revive() {  # name fresh model prompt by
