@@ -96,6 +96,8 @@ POST/PUT/DELETE/PATCH は 405。
 | `/agents/<名前>` | 状態、担当タスク、直近の出力(`herdr agent read`)、最終入力/停止、`session_id`、手元で開く `herdr agent attach`(`claude --resume` は会話が枝分かれするので出さない) |
 | `/tasks`, `/tasks/<id>` | タスク一覧(`?project=` `?status=` で絞り込み)と詳細(報告・成果物・代行依頼) |
 | `/inbox` | 要対応(question・blocked・pending-human・blocked の agent)を上に、直近の報告を下に |
+| `/docs` | agent が成果物として報告したドキュメント(ローカルのファイル)の一覧。新しい順、`?q=` で絞り込み |
+| `/docs/view?ref=<参照>` | そのドキュメントを読む。Markdown は整形して表示(「元のテキストを表示」で切り替え)、フォルダなら中のファイル一覧 |
 | `/jobs` | 各 job の実際に効く設定(間隔・時間帯・曜日・有効/一時停止)、最終記録と最後の実行 |
 | `/jobs/<job>` | スケジュールの変更フォーム(自動更新しない)。保存先は `scheduler/settings/<job>.settings`、次の分から反映。「conf の値に戻す」で settings を消す |
 | `/ledger` | `conductor/dispatch.jsonl` の直近 30 行 |
@@ -106,10 +108,25 @@ POST/PUT/DELETE/PATCH は 405。
 
 - `herdr agent list` / `herdr agent read`(結果は 3 秒キャッシュ)
 - `taskboard/data/tasks.db`(`mode=ro` で開く。無い・壊れていても落ちず、空の表になる)
+- 成果物として登録されたローカルのファイル(`/docs`。読むだけ)
 - `scheduler/logs/*.log`、`scheduler/jobs/*.conf`(`scheduler/bin/show.sh` 経由)、`conductor/dispatch.jsonl`
 - 書き込むのは `scheduler/settings/<job>.settings` だけ。入力は数値・`HH:MM`・決まった曜日だけを受け付け、scheduler が読めない内容なら元に戻す
 
 「滞留」は、`working` のまま最終入力(`agent_activity.last_prompt_at`)から 30 分を超えて停止がない agent。
+
+## ドキュメント(agent のまとめを読む)
+
+agent が「ここにまとめました」と報告したファイルを、VS Code などを開かずにブラウザで読むための画面。
+
+- 出すもの: 報告の成果物(`tb comment --deliverables`)、タスクの成果物(`tasks.deliverables`)、アラートの解析レポート(`tb alert-result --report`)。
+  タスク画面の成果物もここへのリンクになる。URL の成果物はそのまま外部リンク。
+- **開けるのは tasks.db に成果物として登録されたものだけ。** URL にはパスを書かず、参照(`C-<報告id>/<n>`・`task:<タスクid>/<n>`・`A-<アラートid>`)で指す。
+- 相対パスは、報告した agent の作業ディレクトリ(`agent_activity.cwd`)を基準にする。分からなければ「場所不明」。
+- フォルダが成果物なら中のファイルも読める。`..`・絶対パス・外を指すリンクでフォルダの外へは出られない(隠しファイルは一覧に出さない)。
+- 鍵・`.env`・`.ssh` などの認証情報らしいもの、Web UI 自身の `run/` は、登録されていても表示しない。バイナリは表示しない。1 MB を超える分は省略。
+- アラートのレポートは、ファイルが消えていても DB に保存された本文(先頭 50 KB)を出す。
+- Markdown は依存なしの最小限の整形(見出し・箇条書き・表・コード・引用・リンク)。本文は先にエスケープし、生の HTML は文字として出す。リンクにするのは http(s) だけ。
+- 読んでいる途中で再読み込みしないよう、この 2 画面は自動更新しない。
 
 ## 緊急通知
 
@@ -191,6 +208,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.herdr-webui.plist
 | `app/sanitize.py` | 外部由来の文字列の無害化(`e()` を通してから HTML に出す) |
 | `app/herdr.py` | herdr CLI の呼び出し(読むだけ)と短いキャッシュ |
 | `app/data.py` | tasks.db とログの読み取り(読み取り専用の接続)、緊急通知の集計 |
+| `app/docs.py` | 成果物(ドキュメント)の参照の解決と、安全な読み取り |
+| `app/markdown.py` | 最小限の Markdown → HTML(エスケープしてから整形) |
 | `app/actions.py` | 画面からの変更。tasks.db には書かず `tb` を呼ぶ(今は `tb resolve` だけ) |
 | `app/jobs.py` | scheduler のジョブ定義と、Web UI から書く上書き設定 |
 | `app/views.py` | HTML の組み立てと各ページ |
