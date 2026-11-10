@@ -12,8 +12,9 @@ agent が起動したとき・compact の後に自動で読み込まれる(Claud
 | `_common.md` | 全 agent に共通の決まり(報告・送信の方法、受け取った文面の扱い) |
 | `<agent 名>.md` | その agent の役割(例: `conductor.md`, `hr.md`) |
 | `watcher.md` / `analyst.md` | 見張り役(定期の見回り、軽いモデル)/ 解析役(アラート 1 件ごとに tb が起動) |
+| `sweeper.md` | 判定役(定期実行、軽いモデル。動いている agent に「止めてよいか」の印 `tb agent-flag` を付ける。停止はしない) |
 | `auditor.md` | 会計役(定期実行。`tb review-pack` を読み、設定役=人事に改善提案 `tb proposal`) |
-| `map.conf` | agent 名のパターン → 役割ファイル(例: `worker-* = worker`)。`<agent 名>.md` が無いときに使う |
+| `map.conf` | agent 名のパターン → 役割ファイル(例: `worker-* = worker`)。`<agent 名>.md` が無いときに使う。`tb agent-new --role R` で作った agent は `R.md` が map.conf より先に効く |
 
 渡される内容は `_common.md` + その agent の役割ファイル。どちらも無ければ何も渡さない。
 
@@ -23,6 +24,7 @@ agent が起動したとき・compact の後に自動で読み込まれる(Claud
 |---|---|
 | 新しいセッションで起動(`startup`)・`/clear` の後 | 渡す |
 | compact の後 | 渡す(要約で役割が薄れるため) |
+| `tb agent-revive` で復活(`claude --resume`) | `resume` と同じ。役割が変わっていれば新しい版を渡す(`--fresh` なら `startup`) |
 | 同じ会話の再開(`resume`) | 前回と同じ版を渡し済みなら渡さない。役割ファイルが変わっていれば新しい版を渡す |
 | すでに動いている agent に一括で配る | `tb role-broadcast`。そのセッションに同じ版を渡し済みの agent は飛ばす |
 

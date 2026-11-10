@@ -13,6 +13,9 @@ role_file_for() {  # $1=agent 名 → 役割ファイルのパス(無ければ�
   local name=$1 k v pat
   [[ $name =~ ^[A-Za-z0-9._-]{1,64}$ && $name != _* && $name != README ]] || return 0
   if [[ -f $ROLES_DIR/$name.md ]]; then printf '%s' "$ROLES_DIR/$name.md"; return 0; fi
+  # tb agent-new --role で決めた役割(台帳 agents.role)
+  local reg; reg=$(sql "SELECT COALESCE(role,'') FROM agents WHERE name=$(q "$name");" 2>/dev/null) || reg=""
+  if [[ $reg =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && -f $ROLES_DIR/$reg.md ]]; then printf '%s' "$ROLES_DIR/$reg.md"; return 0; fi
   [[ -f $ROLES_DIR/map.conf ]] || return 0
   while IFS='=' read -r k v || [[ -n $k ]]; do
     pat=$(trim "${k%%#*}"); v=$(trim "${v%%#*}")

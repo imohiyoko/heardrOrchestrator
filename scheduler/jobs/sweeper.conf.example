@@ -1,0 +1,10 @@
+# 停止の判定。判定役(roles/sweeper.md、軽いモデル)に 30 分ごとに見回りを依頼し、止めてよい agent に印(tb agent-flag)を付けさせる。
+# 停止そのものは人(Web UI の agent 一覧か tb agent-stop)か、承認された指揮官が行う。送信は tb を通る(messages に記録)。
+TARGET=sweeper
+# 先頭を / にしないこと(スラッシュコマンドと解釈される)
+PROMPT='roles/sweeper.md の手順で見回ってください(tb agents --json を読み、基準どおりに tb agent-flag を付け直す)。'
+WINDOW=09:00-21:00
+INTERVAL_MIN=30
+DAYS=daily
+SKIP_IF="working blocked"
+TZ=Asia/Tokyo
