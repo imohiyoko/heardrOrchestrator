@@ -12,6 +12,8 @@ from .herdr import agent_key, agent_session, get_agents, read_agent, workspace_l
 from .data import NOTIFY_POLL_SEC, activity_for, db_conn, needs_human, parse_jsonl, q, stalled, tail_lines, tasks_for_agent, urgent_items
 from .actions import NOTE_MAX
 from .jobs import DAY_PRESETS, DAY_TOKENS, job_info, job_last, job_names
+from . import docs
+from .markdown import render as render_md
 
 
 CSS = """
@@ -30,13 +32,16 @@ th{background:#eaeef2}
 pre{background:#fff;border:1px solid #d0d7de;padding:8px;overflow:auto;white-space:pre-wrap;word-break:break-all}
 code{background:#eaeef2;padding:1px 4px;border-radius:3px}
 .st-working{color:#9a6700}.st-blocked,.warn{color:#cf222e;font-weight:bold}.st-idle{color:#6e7781}.st-done{color:#1a7f37}
-.note{color:#6e7781;font-size:12px}.err{background:#ffebe9;border:1px solid #cf222e;padding:6px 10px}
+.note{color:#6e7781;font-size:12px}
+.doc{background:#fff;border:1px solid #d0d7de;padding:8px 24px;overflow-wrap:anywhere}
+.doc table{width:auto}.doc pre{background:#f6f8fa}.doc blockquote{border-left:4px solid #d0d7de;margin:0;padding:0 12px;color:#57606a}
+.doc h2.md{font-size:20px;border-bottom:1px solid #d0d7de}.doc ul,.doc ol{padding-left:1.5em}.err{background:#ffebe9;border:1px solid #cf222e;padding:6px 10px}
 """
 NAV = [("/", "概要"), ("/notifications", "緊急通知"), ("/agents", "agent"), ("/tasks", "タスク"),
-       ("/inbox", "報告・承認待ち"), ("/jobs", "定期実行"), ("/ledger", "台帳")]
+       ("/inbox", "報告・承認待ち"), ("/docs", "ドキュメント"), ("/jobs", "定期実行"), ("/ledger", "台帳")]
 
 
-def page(title, body, path, badge, logout="", refresh=True):
+def page(title, body, path, badge, logout="", refresh=True, scripts=()):
     links = []
     for href, label in NAV:
         on = path == href or (href != "/" and path.startswith(href + "/"))
@@ -53,7 +58,8 @@ def page(title, body, path, badge, logout="", refresh=True):
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         '<meta name=referrer content=same-origin>'
         f"<title>{e(title)} - herdr</title><style>{CSS}</style>"
-        '<script src="/notify.js" defer></script></head><body>'
+        '<script src="/notify.js" defer></script>'
+        + "".join(f'<script src="{e(src)}" defer></script>' for src in scripts) + "</head><body>"
         f"<nav>{''.join(links)}{logout}</nav><main><h1>{e(title)}</h1>{body}"
         f'<p class=note>{f"自動更新 {REFRESH_SEC} 秒" if refresh else "入力欄があるので自動更新なし(再読み込みで更新)"} / 変更できるのは定期実行の設定と報告の「対応済み」だけ / 機密を含みうる画面です / Chrome 通知は「緊急通知」で設定</p></main></body></html>'
     )
@@ -280,15 +286,14 @@ def page_task(tid, qs=None, ctx=None):
     t = rows[0]
     info = [(k, e(t.get(k))) for k in ["id", "project", "title", "status", "owner_agent", "session_id", "account",
                                         "parent_id", "summary", "note", "reported_at", "created_at", "updated_at"]]
-    dl = safe_json_list(t["deliverables"])
-    info.append(("成果物", "<br>".join(e(x) for x in dl) or "-"))
+    info.append(("成果物", "<br>".join(doc_link(r, raw) for r, raw in docs.task_refs(t["id"], t["deliverables"])) or "-"))
     body = resolve_notice(qs or {}) + "<table>" + "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in info) + "</table>"
     cm = q("SELECT * FROM comments WHERE task_id=? ORDER BY id DESC", (tid,))
     back = "/tasks/" + quote(str(tid), safe="")
     body += "<h2>報告</h2>" + table(
         ["id", "種別", "本文", "成果物", "from", "配送", "時刻", "対応"],
         [[f"C-{c['id']}", e(c["kind"]), f'<pre>{e(c["text"])}</pre>',
-          "<br>".join(e(x) for x in safe_json_list(c["deliverables"])), e(c["from_name"]),
+          "<br>".join(doc_link(r, raw) for r, raw in docs.comment_refs(c["id"], c["deliverables"])), e(c["from_name"]),
           "済" if c["delivered_at"] else "未", e(c["created_at"]), resolve_cell(c, back, ctx)] for c in cm])
     px = q("SELECT * FROM proxy_requests WHERE task_id=? ORDER BY id DESC", (tid,))
     body += "<h2>代行依頼</h2>" + table(
@@ -404,6 +409,136 @@ def page_notifications(_qs):
     return "緊急通知", body
 
 
+def doc_href(ref, sub=""):
+    return "/docs/view?" + urlencode({"ref": ref, **({"sub": sub} if sub else {})})
+
+
+def doc_link(ref, raw):
+    """成果物の文字列 → Web UI で開くリンク(URL ならそのまま外部リンク)。"""
+    raw = str(raw)
+    if docs.is_url(raw):
+        return f'<a href="{e(raw.strip())}" rel="noopener noreferrer" target=_blank>{e(raw)}</a>'
+    return f'<a href="{e(doc_href(ref))}">{e(raw)}</a>'
+
+
+def _doc_name(raw):
+    s = str(raw or "").rstrip("/")
+    return os.path.basename(s) or s
+
+
+def page_docs(qs, ctx=None):
+    if ctx is not None:
+        ctx["norefresh"] = True  # 絞り込みの入力欄があるので自動更新しない
+    items = docs.recent_docs()
+    kw = clean((qs.get("q") or [""])[0]).strip()[:100]
+    if kw:
+        low = kw.lower()
+        items = [it for it in items if low in " ".join(str(it.get(k) or "") for k in ("raw", "task", "from", "title")).lower()]
+    body = ("<p>agent が報告(<code>tb comment --deliverables</code>・タスクの成果物・アラートの解析レポート)で"
+            "「ここにまとめました」と示したファイルを、新しい順に並べています。名前を押すとこの画面で読めます"
+            "(Markdown は整形して表示)。</p>"
+            f'<form method=get action="/docs"><input type=search name=q value="{e(kw)}" placeholder="パス・タスク・agent で絞り込み" size=36> '
+            "<button type=submit>絞り込み</button></form>"
+            "<h2>パスを指定して開く</h2>" + _open_form() +
+            "<p class=note>開ける範囲: " + (", ".join(f"<code>{e(r)}</code>" for r in docs.allowed_roots()) or "(なし)") +
+            "(agent の作業ディレクトリと <code>WEBUI_DOC_ROOTS</code>。ホームや / そのものは対象外)</p><h2>報告されたドキュメント</h2>")
+    rows = []
+    for it in items:
+        name = _doc_name(it["raw"]) or (f"A-{it['ref'][2:]} の解析レポート" if it["kind"] == "alert" else "-")
+        if docs.is_url(it["raw"]):
+            link = doc_link(it["ref"], it["raw"])
+        else:
+            link = f'<a href="{e(doc_href(it["ref"]))}">{e(name)}</a>'
+        ctx_cell = tlink(it["task"]) if it["task"] else e(it.get("title") or "")
+        rows.append([e(it["ts"]), link, f'<span class=note>{e(it["raw"])}</span>', ctx_cell, e(it["from"]),
+                     e(it["kind"]), e(docs.exists_label(it))])
+    body += table(["時刻", "ドキュメント", "パス", "タスク / アラート", "from", "種別", "状態"], rows)
+    body += ("<p class=note>一覧に出るのは tasks.db に成果物として登録されたものです。相対パスは報告した agent の作業ディレクトリが基準です。"
+             "鍵・.env などの認証情報らしいものは表示しません。</p>")
+    return "ドキュメント", body
+
+
+def page_doc(qs, ctx):
+    ctx["norefresh"] = True  # 読んでいる途中で再読み込みしない
+    ref = (qs.get("ref") or [""])[0]
+    given = (qs.get("path") or [""])[0]
+    sub = (qs.get("sub") or [""])[0]
+    raw_mode = (qs.get("raw") or [""])[0] == "1"
+    head = "<p><a href=\"/docs\">← ドキュメント一覧</a></p>"
+    if given and not ref:  # パスを直接指定(agent の作業ディレクトリ配下だけ)
+        p, why = docs.open_path(given)
+        if p is None:
+            return "ドキュメント", head + err_html(why) + _open_form(given)
+        base_q = {"path": given}
+        ent = {"raw": given, "path": p, "report": None}
+        title = _doc_name(given)
+        meta = [("指定したパス", e(given)), ("場所", e(p))]
+    else:
+        ent = docs.lookup(ref)
+        if ent is None:
+            return None
+        base_q = {"ref": ref}
+        title = _doc_name(ent["raw"]) or f"{ref} の解析レポート"
+        meta = [("登録された値", e(ent["raw"]) or "-"), ("場所", e(ent["path"]) if ent["path"] else "-"),
+                ("タスク", tlink(ent["task"]) if ent["task"] else e(ent.get("title") or "-")),
+                ("from", e(ent["from"])), ("時刻", e(ent["ts"])), ("参照", e(ref))]
+        if docs.is_url(ent["raw"]):
+            return title, head + f'<p>URL です: {doc_link(ref, ent["raw"])}</p>'
+    path = ent["path"]
+    if path and sub:
+        p2 = docs.sub_path(path, sub)
+        if p2 is None or not os.path.isdir(path):
+            return None
+        path, title = p2, sub
+        meta.insert(2, ("フォルダ内", e(sub)))
+        base_q = {**base_q, "sub": sub}
+    info = "<table>" + "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in meta) + "</table>"
+    if path is None:
+        if ent.get("report"):
+            return title, head + info + "<h2>解析レポート(DB に保存された本文)</h2>" + _doc_body(ent["report"], ".md", raw_mode, base_q, ctx)
+        return title, head + info + err_html("ファイルの場所を決められません(相対パスで、報告した agent の作業ディレクトリが分からない)")
+    kind, text, trunc, size = docs.read_text(path)
+    if kind == "dir":
+        files, more = docs.list_dir(path)
+        top = {k: v for k, v in base_q.items() if k != "sub"}
+        rows = [[f'<a href="/docs/view?{e(urlencode({**top, "sub": os.path.relpath(os.path.join(path, f), ent["path"])}))}">{e(f)}</a>']
+                for f in files]
+        return title, head + info + "<h2>フォルダの中身</h2>" + table(["ファイル"], rows) + (
+            f"<p class=note>先頭 {docs.MAX_LIST} 件だけ表示しています</p>" if more else "")
+    if kind == "missing":
+        if ent.get("report"):
+            return title, head + info + "<p class=note>ファイルは見つかりませんでした。DB に保存された本文を表示します。</p>" + \
+                _doc_body(ent["report"], ".md", raw_mode, base_q, ctx)
+        return title, head + info + err_html("ファイルが見つかりません(移動・削除された可能性があります)")
+    if kind == "binary":
+        return title, head + info + err_html(f"テキストではないので表示しません({size} バイト)")
+    if kind in ("denied", "error"):
+        return title, head + info + err_html(text)
+    note = f"<p class=note>大きいので先頭 {docs.MAX_BYTES // 1024} KB だけ表示しています(全体 {size} バイト)</p>" if trunc else ""
+    ext = os.path.splitext(path)[1].lower()
+    return title, head + info + note + _doc_body(text, ext, raw_mode, base_q, ctx)
+
+
+def _open_form(value=""):
+    return ('<form method=get action="/docs/view"><input type=text name=path value="' + e(value) + '" '
+            'placeholder="/絶対パス/まとめ.md(agent の作業ディレクトリ配下)" size=60> <button type=submit>開く</button></form>')
+
+
+def _doc_body(text, ext, raw_mode, base_q, ctx):
+    if ext in docs.MD_EXT or ext in (".mmd", ".mermaid"):
+        if ext in (".mmd", ".mermaid"):
+            text = "```mermaid\n" + text + "\n```"
+        if raw_mode:
+            sw = f'<p class=note><a href="/docs/view?{e(urlencode(base_q))}">整形して表示</a></p>'
+            return sw + f"<pre>{e(text)}</pre>"
+        html = render_md(text)
+        if "<pre class=mermaid>" in html:  # 図は同梱の mermaid.js でブラウザが描く(JS が無ければコードのまま)
+            ctx["scripts"] = ["/static/mermaid.min.js", "/docs.js"]
+        sw = f'<p class=note><a href="/docs/view?{e(urlencode({**base_q, "raw": "1"}))}">元のテキストを表示</a></p>'
+        return sw + f"<div class=doc>{html}</div>"
+    return f"<pre>{e(text)}</pre>"
+
+
 STATIC = {"/": page_overview, "/notifications": page_notifications, "/agents": page_agents, "/tasks": page_tasks, "/inbox": page_inbox,
           "/jobs": page_jobs, "/ledger": page_ledger}
 
@@ -415,6 +550,10 @@ def route(path, qs, ctx=None):
         path = path.rstrip("/")
     if path == "/inbox":
         return page_inbox(qs, ctx)
+    if path == "/docs":
+        return page_docs(qs, ctx)
+    if path == "/docs/view":
+        return page_doc(qs, ctx)
     if path in STATIC:
         t, b = STATIC[path](qs)
         return t, b
@@ -425,6 +564,17 @@ def route(path, qs, ctx=None):
         return r
     return None
 
+
+DOCS_JS = """(function () {
+  "use strict";
+  // /docs/view の ```mermaid を図にする。securityLevel strict(ラベル内の HTML・クリックの JS は無効)
+  if (!window.mermaid) return;
+  try {
+    window.mermaid.initialize({startOnLoad: false, securityLevel: "strict"});
+    window.mermaid.run({querySelector: "pre.mermaid"}).catch(function () {});
+  } catch (x) {}
+})();
+"""
 
 NOTIFY_JS = """(function () {
   "use strict";

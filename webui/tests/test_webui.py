@@ -546,6 +546,87 @@ check("2 回目は already、戻り先は自サイトだけ", r[0] == 302 and r[
 r = cl.raw("POST", "/resolve", {"id": "999", "back": "/tasks/T-1", "csrf": cl.csrf("/inbox")})
 check("存在しない報告は error", r[0] == 302 and r[1].get("Location") == "/tasks/T-1?resolved=error", str(r[:2]))
 
+# ---- ドキュメント(agent が成果物として報告したローカルのファイル)
+DOCS = os.path.join(d, "work")
+os.makedirs(os.path.join(DOCS, "out", "sub"), exist_ok=True)
+os.makedirs(os.path.join(d, "home", ".ssh"), exist_ok=True)
+open(os.path.join(DOCS, "summary.md"), "w").write(
+    "# まとめ " + XSS + "\n\n- 項目 **太字** と `code`\n- [リンク](https://example.com/a?b=1&c=2)\n- [危険](javascript:alert(1))\n\n"
+    "| 列1 | 列2 |\n|---|---|\n| a | <b>b</b> |\n\n```\n<script>x</script>\n```\n")
+open(os.path.join(DOCS, "out", "sub", "note.txt"), "w").write("内側のファイル " + XSS)
+open(os.path.join(d, "outside.txt"), "w").write("外のファイル")
+os.symlink(os.path.join(d, "outside.txt"), os.path.join(DOCS, "out", "link.txt"))
+open(os.path.join(DOCS, ".env"), "w").write("SECRET=1")
+open(os.path.join(d, "home", ".ssh", "id_ed25519"), "w").write("PRIVATE")
+open(os.path.join(DOCS, "bin.dat"), "wb").write(b"\x00\x01\x02")
+_c = sqlite3.connect(env["WEBUI_TB_DB"])
+_c.execute("INSERT INTO agent_activity (session_id,cwd,updated_at) VALUES ('sess-w',?, '2026-11-06T00:00:00Z')", (DOCS,))
+_dl = json.dumps(["summary.md", os.path.join(DOCS, "out"), ".env", os.path.join(d, "home", ".ssh", "id_ed25519"),
+                  "bin.dat", "gone.md", "https://example.com/pr/1", os.path.join(d, "outside.txt") + "/../" + "outside.txt"])
+_c.execute("INSERT INTO comments (task_id,kind,text,deliverables,from_name,from_pane,from_session,created_at) VALUES "
+           "('T-1','done','終わり',?,'alpha','w1:p1','sess-w','2026-11-07T00:00:00Z')", (_dl,))
+_cid = _c.execute("SELECT max(id) FROM comments").fetchone()[0]
+_c.execute("INSERT INTO alerts (fingerprint,title,source,status,result_summary,result_report,result_path,result_by,first_seen,last_seen,analyzed_at) "
+           "VALUES ('f','障害 " + XSS + "','cli','analyzed','要約','## 原因\n\nDB の本文','/nonexistent/report.md','analyst','t','t','2026-11-08T00:00:00Z')")
+_aid = _c.execute("SELECT max(id) FROM alerts").fetchone()[0]
+_c.commit()
+_c.close()
+s_, _, b = cl.get("/docs")
+check("GET /docs が 200 で一覧", s_ == 200 and "summary.md" in b and f"ref=C-{_cid}%2F0" in b and f"ref=A-{_aid}" in b, str(s_))
+check("/docs: ナビにドキュメント・入力欄があるので自動更新しない", 'href="/docs"' in b and 'http-equiv="refresh"' not in b)
+check("/docs: 状態(あり/フォルダ/なし/非表示/URL/DB に本文)",
+      all(x in b for x in ("あり", "フォルダ", "なし", "非表示", "URL", "DB に本文")))
+check("/docs: XSS がエスケープ", "<script" not in no_js(b).lower())
+check("/docs?q= で絞り込み", "summary.md" in cl.get("/docs?q=summary")[2] and "summary.md" not in cl.get("/docs?q=zzzz")[2])
+V = lambda ref, **kw: cl.get("/docs/view?" + urllib.parse.urlencode({"ref": ref, **kw}))  # noqa: E731
+s_, _, b = V(f"C-{_cid}/0")
+check("相対パスは agent の作業ディレクトリ基準で開ける", s_ == 200 and "<div class=doc>" in b, str(s_))
+check("Markdown を整形(見出し・太字・code・表)",
+      "<h2 class=md>まとめ &lt;script&gt;" in b and "<strong>太字</strong>" in b and "<code>code</code>" in b and "<th>列1</th>" in b)
+check("Markdown: http(s) だけリンクにし、javascript: はリンクにしない",
+      'href="https://example.com/a?b=1&amp;c=2"' in b and 'href="javascript' not in b.lower())
+check("Markdown: 生 HTML とコードブロックはエスケープ", "&lt;b&gt;b&lt;/b&gt;" in b and "&lt;script&gt;x&lt;/script&gt;" in b
+      and "<script" not in no_js(b).lower())
+check("文書ページは自動更新しない", 'http-equiv="refresh"' not in b)
+check("元のテキスト表示", "<pre># まとめ &lt;script&gt;" in V(f"C-{_cid}/0", raw="1")[2])
+b = V(f"C-{_cid}/1")[2]
+check("フォルダは中身の一覧(外を指すリンクは出さない)", "sub/note.txt" in b and "link.txt" not in b)
+check("フォルダ内のファイルを開ける", "内側のファイル &lt;script&gt;" in V(f"C-{_cid}/1", sub="sub/note.txt")[2])
+check("フォルダの外へは出られない(.. / 絶対パス / リンク)",
+      all(V(f"C-{_cid}/1", sub=x)[0] == 404 for x in ("../summary.md", "/etc/passwd", "link.txt", "../../outside.txt")))
+check(".env は開かない", "認証情報" in V(f"C-{_cid}/2")[2] and "SECRET" not in V(f"C-{_cid}/2")[2])
+check(".ssh の鍵は開かない", "PRIVATE" not in V(f"C-{_cid}/3")[2] and "認証情報" in V(f"C-{_cid}/3")[2])
+check("バイナリは表示しない", "テキストではない" in V(f"C-{_cid}/4")[2])
+check("無いファイルは見つからないと出す", "見つかりません" in V(f"C-{_cid}/5")[2])
+check("URL の成果物は外部リンク", 'href="https://example.com/pr/1"' in V(f"C-{_cid}/6")[2])
+b = V(f"A-{_aid}")[2]
+check("アラートの解析レポートは DB の本文を出す", "DB の本文" in b and "<h3 class=md>原因</h3>" in b and "&lt;script&gt;" in b)
+check("登録されていない参照は 404", all(V(x)[0] == 404 for x in (f"C-{_cid}/99", "C-99999/0", "task:nope/0", "T-1/0", "A-99999", "/etc/passwd", "")))
+# パスを指定して開く(agent の作業ディレクトリ配下だけ)
+check("/docs に開ける範囲(agent の作業ディレクトリ)が出る", f"<code>{DOCS}</code>" in cl.get("/docs")[2])
+b = V("", path=os.path.join(DOCS, "summary.md"))[2]
+check("作業ディレクトリ配下のパスは開ける(Markdown 整形)", "<div class=doc>" in b and "<strong>太字</strong>" in b)
+check("パス指定でもフォルダの中を開ける", "内側のファイル" in V("", path=os.path.join(DOCS, "out"), sub="sub/note.txt")[2])
+for bad in ("/etc/passwd", os.path.join(d, "outside.txt"), os.path.join(DOCS, "out", "link.txt"), os.path.join(DOCS, "..", "outside.txt"),
+            "summary.md", "~"):
+    b = V("", path=bad)[2]
+    check(f"範囲外・相対は開けない: {bad}", "開けません" in b or "絶対パス" in b, bad)
+check("パス指定でも .env は開かない", "SECRET" not in V("", path=os.path.join(DOCS, ".env"))[2])
+# Mermaid(同梱の mermaid.js でブラウザが描く)
+open(os.path.join(DOCS, "flow.md"), "w").write("# 図\n\n```mermaid\ngraph TD\n  A[" + XSS + "] --> B\n```\n")
+open(os.path.join(DOCS, "seq.mmd"), "w").write("sequenceDiagram\n  A->>B: hi\n")
+b = V("", path=os.path.join(DOCS, "flow.md"))[2]
+check("```mermaid は pre.mermaid(中身はエスケープ)", "<pre class=mermaid>graph TD\n  A[&lt;script&gt;" in b)
+check("Mermaid があるページだけ同梱 JS を読む", '<script src="/static/mermaid.min.js" defer>' in b and '<script src="/docs.js" defer>' in b
+      and "/static/mermaid.min.js" not in V("", path=os.path.join(DOCS, "summary.md"))[2])
+check(".mmd も図にする", "<pre class=mermaid>sequenceDiagram" in V("", path=os.path.join(DOCS, "seq.mmd"))[2])
+s_, h, b = cl.get("/static/mermaid.min.js")
+check("同梱の mermaid.min.js を同一オリジンから配る", s_ == 200 and h.get("Content-Type", "").startswith("text/javascript") and len(b) > 100000)
+check("未ログインでは同梱 JS も読めない", Client(port).get("/static/mermaid.min.js")[0] == 302 and Client(port).get("/docs.js")[0] == 302)
+check("static の他のファイルは出さない", cl.get("/static/mermaid.LICENSE")[0] == 404 and cl.get("/static/../app/docs.py")[0] == 404)
+b = cl.get("/tasks/T-1")[2]
+check("タスク画面の成果物が Web UI へのリンクになる", f'href="/docs/view?ref=C-{_cid}%2F0"' in b and f'href="/docs/view?ref=task%3AT-1%2F0"' in b)
+
 # ---- 他のメソッド
 for method in ("POST", "PUT", "DELETE", "PATCH"):
     for path in ("/inbox", "/agents/alpha", "/tasks"):
