@@ -39,3 +39,9 @@ bash setup/tests/run.sh
 Tests use fake `herdr` binaries and do not touch a real herdr, launchd, or the network. Runtime state (`data/`, `run/`, `logs/`, `generated/`) is git-ignored.
 
 Copy `scheduler/jobs/*.conf.example` to `*.conf` and adjust before use, or start the setup agent with `./herdr-up.sh setup` and let it guide you. `bash setup/check.sh` shows what is installed and what is missing.
+
+## License
+
+Copyright 2026 imohiyoko
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
