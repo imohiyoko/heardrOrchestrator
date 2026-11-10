@@ -73,3 +73,15 @@ eq "agent-new: start fails → 11 and nothing left in the registry" "$(FAKE_STAR
 eq "agents --json: material for the sweeper" "$($TB agents --json | jq -r 'select(.name=="worker1") | [.state, .killable, .open_tasks, .open_questions, .idle_min != null, .role_file] | map(tostring) | join(" ")')" "running unknown 0 0 true worker.md"
 export TB_APPROVALS=$TMP/appr.conf
 unset FAKE_AGENTS; export HERDR_PANE_ID=$_saved_pane
+# 別の herdr セッションの agent は、見えなくても止まった扱いにせず、復活もさせない
+_saved_pane=${HERDR_PANE_ID-}; unset HERDR_PANE_ID
+export TB_DB=$TMP/agents.db TB_APPROVALS=$TMP/appr-agent.conf TB_SPAWN_RETRY_SEC=0 TB_AGENT_CWD=$TMP
+export FAKE_AGENTS='[{"pane_id":"wX:p1","name":"far","agent_status":"idle","agent_session":{"value":"sf"}}]'
+HERDR_SESSION=other $TB agents >/dev/null
+export FAKE_AGENTS='[]'
+$TB agents >/dev/null
+eq "agents: other herdr session is not marked stopped" "$(sqlite3 "$TB_DB" "SELECT state||' '||herdr_session FROM agents WHERE name='far';")" "running other"
+eq "agent-revive: other herdr session → 1 with a hint" "$($TB agent-revive far 2>&1 | grep -c 'HERDR_SESSION=other')" "1"
+eq "agent-stop: other herdr session → hint" "$($TB agent-stop far --force 2>&1 | grep -c 'HERDR_SESSION=other')" "1"
+export TB_APPROVALS=$TMP/appr.conf
+unset FAKE_AGENTS; export HERDR_PANE_ID=$_saved_pane

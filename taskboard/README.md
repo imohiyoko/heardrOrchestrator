@@ -217,6 +217,7 @@ tb agent-approve L-<n> [--always] / tb agent-reject L-<n>      # 人だけ
   解析役(`analyst-A<n>`)は `tb alert-result` を返した時点で tb が yes を付ける。判定役の定期実行は `scheduler/jobs/sweeper.conf.example`
 - **誰が実行できるか**: 人の端末(と Web UI)からはそのまま実行する。agent の pane からは `approvals.conf` の `agent:<op>:<名前>`(op は `new|stop|revive`、既定 `agent:* = ask`)を見て、
   `ask` なら `L-<n>` として人の承認待ちに積む(終了コード 20。Web UI の緊急通知と agent 一覧に出る)。`allow` ならそのまま実行する(停止の前提はそれでも確かめる)。`--force` は人だけ
+- herdr のセッション(`HERDR_SESSION`、プリセットの `# session:`)ごとに台帳を分けて扱う。別セッションの agent は同期で「止まった」扱いにせず、操作するときは `HERDR_SESSION=<名前>` を付けるよう案内する
 - 実行したもの・断ったもの・承認待ちは `agent_ops` にすべて残る。終了コード: 0 実行済み / 1 拒否・前提違い / 11 herdr の失敗 / 20 承認待ち
 
 ## 会計役(定期レビュー)と改善提案
@@ -284,7 +285,7 @@ agent への送信も DB への書き込みも、すべて `tb` を通る。後�
 `effect` は `read-only|write|external`、`status` は `open|done|pending-human|denied`。
 `comments(id, task_id, kind, text, deliverables, from_name, from_pane, from_session, delivered_at, created_at)`
 `agent_activity(session_id PK, pane_id, tab_id, workspace_id, cwd, last_prompt_id, last_prompt_at, last_stop_at, updated_at)`
-`messages(id, kind, ref, target, body, result, created_at)` / `alerts(id, fingerprint, severity, title, body, source, source_pane, status, count, analyst, note, result_*, first_seen, last_seen, analysis_started_at, analyzed_at, closed_at)` / `proposals(id, role_file, title, text, status, by_name, note, delivered_at, resolved_at, created_at)` / `reviews(id, since_at, until_at, created_at)` / `approval_changes(id, pattern, value, created_at)` / `role_briefings(id, session_id, agent, role_file, hash, source, via, created_at)` / `outbox(id, from_name, from_pane, from_session, target, kind, task_id, text, status, reason, sent_at, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)` / `agents(name PK, kind, cwd, model, role, session_id, pane_id, state, killable, killable_reason, killable_by, killable_at, killable_session, created_by, created_at, updated_at, stopped_at)` / `agent_ops(id, op, target, args, requested_by, status, result, created_at, decided_at)`
+`messages(id, kind, ref, target, body, result, created_at)` / `alerts(id, fingerprint, severity, title, body, source, source_pane, status, count, analyst, note, result_*, first_seen, last_seen, analysis_started_at, analyzed_at, closed_at)` / `proposals(id, role_file, title, text, status, by_name, note, delivered_at, resolved_at, created_at)` / `reviews(id, since_at, until_at, created_at)` / `approval_changes(id, pattern, value, created_at)` / `role_briefings(id, session_id, agent, role_file, hash, source, via, created_at)` / `outbox(id, from_name, from_pane, from_session, target, kind, task_id, text, status, reason, sent_at, created_at)` / `digests(id, target, item_count, body, created_at)` / `observations(key PK, kind, task_id, text, digest_id, created_at)` / `agents(name PK, kind, cwd, model, role, session_id, pane_id, herdr_session, state, killable, killable_reason, killable_by, killable_at, killable_session, created_by, created_at, updated_at, stopped_at)` / `agent_ops(id, op, target, args, requested_by, status, result, created_at, decided_at)`
 `tasks.status` は `todo|in_progress|review|done|blocked`。`summary`(done の要約)と `note`(block の理由)は設計メモの最小案への追加。
 時刻は UTC の ISO 8601。
 

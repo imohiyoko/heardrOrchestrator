@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS agents (
   role             TEXT,                           -- tb agent-new --role(roles/<role>.md)。無ければ名前と map.conf で決まる
   session_id       TEXT,                           -- 最後に見た会話(herdr の agent_session)。復活で --resume に渡す
   pane_id          TEXT,
+  herdr_session    TEXT NOT NULL DEFAULT 'default', -- どの herdr セッション(HERDR_SESSION)の agent か。別セッションのものは同期・操作しない
   state            TEXT NOT NULL CHECK (state IN ('running','stopped')),
   killable         TEXT NOT NULL DEFAULT 'unknown' CHECK (killable IN ('yes','no','unknown')),
   killable_reason  TEXT,
