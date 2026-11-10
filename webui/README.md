@@ -1,7 +1,7 @@
 # webui — herdr 進捗の Web UI
 
 agent・タスク・報告・定期実行・台帳を、ブラウザで見るための小さなサーバー。
-Python 3 の標準ライブラリだけで動く(依存なし)。
+Python 3 の標準ライブラリだけで動く(依存なし)。Mermaid の図を描くための `mermaid.min.js` だけは `webui/static/` に同梱している(CDN は使わない)。
 
 - サーバー側で HTML を組み立てる複数ページ構成(SPA ではない)。自動更新は `<meta http-equiv="refresh">`(8 秒)。
 - 全ページに共通ナビと、承認待ち件数のバッジ(報告の question/blocked + `pending-human` の代行依頼 + blocked の agent)。
@@ -99,6 +99,9 @@ POST/PUT/DELETE/PATCH は 405。
 | `/agents/<名前>` | 状態、担当タスク、直近の出力(`herdr agent read`)、最終入力/停止、`session_id`、手元で開く `herdr agent attach`(`claude --resume` は会話が枝分かれするので出さない) |
 | `/tasks`, `/tasks/<id>` | タスク一覧(`?project=` `?status=` で絞り込み)と詳細(報告・成果物・代行依頼) |
 | `/inbox` | 要対応(question・blocked・pending-human・blocked の agent)を上に、直近の報告を下に |
+| `/docs` | agent が成果物として報告したドキュメント(ローカルのファイル)の一覧。新しい順、`?q=` で絞り込み |
+| `/docs/view?ref=<参照>` | そのドキュメントを読む。Markdown は整形して表示(Mermaid は図に。「元のテキストを表示」で切り替え)、フォルダなら中のファイル一覧 |
+| `/docs/view?path=<絶対パス>` | パスを指定して読む(agent の作業ディレクトリ配下だけ。`/docs` の入力欄から) |
 | `/jobs` | 各 job の実際に効く設定(間隔・時間帯・曜日・有効/一時停止)、最終記録と最後の実行 |
 | `/jobs/<job>` | スケジュールの変更フォーム(自動更新しない)。保存先は `scheduler/settings/<job>.settings`、次の分から反映。「conf の値に戻す」で settings を消す |
 | `/ledger` | `conductor/dispatch.jsonl` の直近 30 行 |
@@ -109,10 +112,30 @@ POST/PUT/DELETE/PATCH は 405。
 
 - `herdr agent list` / `herdr agent read`(結果は 3 秒キャッシュ)
 - `taskboard/data/tasks.db`(`mode=ro` で開く。無い・壊れていても落ちず、空の表になる)
+- 成果物として登録されたローカルのファイル(`/docs`。読むだけ)
 - `scheduler/logs/*.log`、`scheduler/jobs/*.conf`(`scheduler/bin/show.sh` 経由)、`conductor/dispatch.jsonl`
 - 書き込むのは `scheduler/settings/<job>.settings` だけ。入力は数値・`HH:MM`・決まった曜日だけを受け付け、scheduler が読めない内容なら元に戻す
 
 「滞留」は、`working` のまま最終入力(`agent_activity.last_prompt_at`)から 30 分を超えて停止がない agent。
+
+## ドキュメント(agent のまとめを読む)
+
+agent が「ここにまとめました」と報告したファイルを、VS Code などを開かずにブラウザで読むための画面。
+
+- 出すもの: 報告の成果物(`tb comment --deliverables`)、タスクの成果物(`tasks.deliverables`)、アラートの解析レポート(`tb alert-result --report`)。
+  タスク画面の成果物もここへのリンクになる。URL の成果物はそのまま外部リンク。
+- 一覧の項目は参照(`C-<報告id>/<n>`・`task:<タスクid>/<n>`・`A-<アラートid>`)で指す。
+- **パスを指定して開く**(`/docs` の入力欄、`/docs/view?path=`): 絶対パス(`~` 可)だけ。開けるのは、agent の作業ディレクトリ
+  (`agent_activity.cwd`)と `WEBUI_DOC_ROOTS`(`:` 区切り)の配下だけ。ホーム・`/`・`/tmp` などそのものは広すぎるので範囲にしない。
+  シンボリックリンクは実体で判定する。開ける範囲は `/docs` に表示する。
+- 相対パスは、報告した agent の作業ディレクトリ(`agent_activity.cwd`)を基準にする。分からなければ「場所不明」。
+- フォルダが成果物なら中のファイルも読める。`..`・絶対パス・外を指すリンクでフォルダの外へは出られない(隠しファイルは一覧に出さない)。
+- 鍵・`.env`・`.ssh` などの認証情報らしいもの、Web UI 自身の `run/` は、登録されていても表示しない。バイナリは表示しない。1 MB を超える分は省略。
+- アラートのレポートは、ファイルが消えていても DB に保存された本文(先頭 50 KB)を出す。
+- Markdown は依存なしの最小限の整形(見出し・箇条書き・表・コード・引用・リンク)。本文は先にエスケープし、生の HTML は文字として出す。リンクにするのは http(s) だけ。
+- **Mermaid**: ```` ```mermaid ```` のブロックと `.mmd` / `.mermaid` ファイルは、同梱の `/static/mermaid.min.js` がブラウザで図にする
+  (`securityLevel: "strict"`。図があるページだけ読み込む)。JS が動かなければ元のコードのまま読める。
+- 読んでいる途中で再読み込みしないよう、この 2 画面は自動更新しない。
 
 ## 緊急通知
 
@@ -147,7 +170,8 @@ ttyd(ブラウザ上の端末)は採用しない。署名が無効で、会社�
 - `127.0.0.1` のみで待ち受ける。Host ヘッダが自分以外なら 403(DNS リバインディング対策)。
 - agent の出力・タスク本文・ログなど外部由来の文字列は、ANSI 等の制御文字を除いたうえで HTML エスケープして出す。
   CSP は `default-src 'none'` を基本に、`script-src 'self'` と `connect-src 'self'` だけを許す。JS は同一オリジンの
-  `/notify.js`(通知のポーリングだけ。ログイン必須)の 1 本で、インラインスクリプトは使えない。通知の文面は
+  `/notify.js`(通知のポーリングだけ。ログイン必須)と、Mermaid の図があるドキュメントだけで読む `/static/mermaid.min.js`・`/docs.js`
+  (どれもログイン必須)で、インラインスクリプトは使えない。通知の文面は
   `textContent` と Notification の本文(プレーンテキスト)にしか入れない。
 - ログ(launchd の out/err を含む)には、メソッド・パス・状態コードだけを出す。クエリ、Cookie、フォーム本文、
   パスワード、セッション値、例外のメッセージは出さない。ログイン成否も理由を区別せず `login: ok/failed/locked` のみ。
@@ -180,6 +204,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.herdr-webui.plist
 | `HERDR_WEBUI_RANGE` | `8800-8819` | 探索範囲(`下限-上限`)。テスト用 |
 | `WEBUI_SESSION_TTL` / `WEBUI_LOCK_MAX` / `WEBUI_LOCK_SEC` | `43200` / `5` / `300` | ログインの有効秒数 / ロックまでの失敗回数 / ロック秒数 |
 | `WEBUI_FAIL_DELAY` | `1` | ログイン・再設定の失敗時の遅延(秒) |
+| `WEBUI_DOC_ROOTS` | (なし) | パス指定で開いてよいディレクトリを足す(`:` 区切り)。agent の作業ディレクトリは自動で入る |
 | `HERDR_BIN` | `herdr` | herdr の実行ファイル(テストで疑似に差し替え) |
 | `WEBUI_TB_DB` | `TB_DB`、無ければ `taskboard/data/tasks.db` | tb と同じ DB(既定は `lib/herdr_env.py`) |
 | `WEBUI_SCHED_LOGS` / `WEBUI_SCHED_JOBS` / `WEBUI_SCHED_SETTINGS` / `WEBUI_DISPATCH` / `WEBUI_RUN_DIR` | 兄弟ディレクトリ / `webui/run` | データ源・settings・`run/` の場所 |
@@ -194,6 +219,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.herdr-webui.plist
 | `app/sanitize.py` | 外部由来の文字列の無害化(`e()` を通してから HTML に出す) |
 | `app/herdr.py` | herdr CLI の呼び出し(読むだけ)と短いキャッシュ |
 | `app/data.py` | tasks.db とログの読み取り(読み取り専用の接続)、緊急通知の集計 |
+| `app/docs.py` | 成果物(ドキュメント)の参照の解決と、安全な読み取り |
+| `app/markdown.py` | 最小限の Markdown → HTML(エスケープしてから整形) |
 | `app/actions.py` | 画面からの変更。tasks.db には書かず `tb` を呼ぶ(今は `tb resolve` だけ) |
 | `app/jobs.py` | scheduler のジョブ定義と、Web UI から書く上書き設定 |
 | `app/views.py` | HTML の組み立てと各ページ |
