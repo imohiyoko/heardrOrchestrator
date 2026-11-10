@@ -455,12 +455,12 @@ def page_job(name, csrf, error="", saved=False):
     hid = f'<input type=hidden name=csrf value="{e(csrf)}">'
     sec = interval_sec(info)
     unit = "min" if sec % 60 == 0 else "sec"
-    iv, hi = (sec // 60, 1440) if unit == "min" else (sec, 86400)
+    iv = sec // 60 if unit == "min" else sec
     units = "".join(f'<option value={u}{" selected" if u == unit else ""}>{e(lbl)}</option>' for u, lbl, _ in INTERVAL_UNITS)
     form = (
         f'<form method=post action="/jobs/{quote(name)}">{hid}<input type=hidden name=action value=save>'
-        f'<p><label>間隔<br><input type=number name=interval min=1 max={hi} required value="{iv}"></label> '
-        f'<select name=interval_unit>{units}</select></p>'
+        f'<p><label>間隔<br><input type=number name=interval min=1 max=86400 required value="{iv}"></label> '
+        f'<select name=interval_unit>{units}</select> <span class=note>分は 1440 まで、秒は 86400 まで</span></p>'
         f'<p><label>開始 <input type=time name=start step=1 required value="{e(info["start"])}"></label> '
         f'<label>終了 <input type=time name=end step=1 required value="{e(info["end"])}"></label>'
         f' <span class=note>両端を含む(秒を省いた終了はその分の 59 秒まで)。日またぎは不可。TZ は {e(info["tz"])}</span></p>'
