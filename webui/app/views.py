@@ -11,7 +11,7 @@ from .sanitize import clean, e
 from .herdr import agent_key, agent_session, get_agents, read_agent, workspace_label
 from .data import NOTIFY_POLL_SEC, activity_for, agent_ops, agent_registry, stopped_agents, db_conn, needs_human, parse_jsonl, q, stalled, tail_lines, tasks_for_agent, urgent_items
 from .actions import NOTE_MAX
-from .jobs import DAY_PRESETS, DAY_TOKENS, job_info, job_last, job_names
+from .jobs import DAY_PRESETS, DAY_TOKENS, INTERVAL_UNITS, interval_sec, interval_text, job_info, job_last, job_names
 from . import docs
 from .markdown import render as render_md
 
@@ -426,7 +426,7 @@ def page_jobs(_qs):
         info, err = job_info(n) if n in names else (None, "jobs/ に conf がない")
         last, lr = job_last(n)
         if info:
-            sched = (f'{e(info["interval_min"])} 分おき / {e(info["start"])}-{e(info["end"])} / {e(info["days"])}'
+            sched = (f'{e(interval_text(info))}おき / {e(info["start"])}-{e(info["end"])} / {e(info["days"])}'
                      + (" <span class=note>(Web UI で変更済み)</span>" if info.get("overridden") else ""))
             st = "有効" if info.get("enabled") else '<span class=warn>一時停止</span>'
             what = e(info["target"]) if info["kind"] == "prompt" else "コマンド"
@@ -436,7 +436,7 @@ def page_jobs(_qs):
                      (f'{e(last.get("ts"))} {e(last.get("action"))} {e(last.get("reason"))}' if last else "-"),
                      (f'{e(lr.get("ts"))} / {e(lr.get("action"))}' + (f' (exit {e(lr.get("exit"))})' if "exit" in lr else "")
                       if lr else "-")])
-    note = "<p class=note>job 名を開くと、間隔・時間帯・曜日・一時停止を変更できます(次の分から反映)。</p>"
+    note = "<p class=note>job 名を開くと、間隔(分・秒)・時間帯・曜日・一時停止を変更できます(次の分から反映)。</p>"
     return "定期実行", note + table(["job", "宛先", "間隔 / 時間帯 / 曜日", "状態", "最終記録", "最後の実行"], rows)
 
 
@@ -453,12 +453,17 @@ def page_job(name, csrf, error="", saved=False):
     checks = "".join(f'<label><input type=checkbox name=day_{t} value=1{" checked" if t in toks else ""}> {t.capitalize()}</label> '
                      for t in DAY_TOKENS)
     hid = f'<input type=hidden name=csrf value="{e(csrf)}">'
+    sec = interval_sec(info)
+    unit = "min" if sec % 60 == 0 else "sec"
+    iv, hi = (sec // 60, 1440) if unit == "min" else (sec, 86400)
+    units = "".join(f'<option value={u}{" selected" if u == unit else ""}>{e(lbl)}</option>' for u, lbl, _ in INTERVAL_UNITS)
     form = (
         f'<form method=post action="/jobs/{quote(name)}">{hid}<input type=hidden name=action value=save>'
-        f'<p><label>間隔(分)<br><input type=number name=interval_min min=1 max=1440 required value="{e(info["interval_min"])}"></label></p>'
-        f'<p><label>開始 <input type=time name=start required value="{e(info["start"])}"></label> '
-        f'<label>終了 <input type=time name=end required value="{e(info["end"])}"></label>'
-        f' <span class=note>両端を含む。日またぎは不可。TZ は {e(info["tz"])}</span></p>'
+        f'<p><label>間隔<br><input type=number name=interval min=1 max={hi} required value="{iv}"></label> '
+        f'<select name=interval_unit>{units}</select></p>'
+        f'<p><label>開始 <input type=time name=start step=1 required value="{e(info["start"])}"></label> '
+        f'<label>終了 <input type=time name=end step=1 required value="{e(info["end"])}"></label>'
+        f' <span class=note>両端を含む(秒を省いた終了はその分の 59 秒まで)。日またぎは不可。TZ は {e(info["tz"])}</span></p>'
         f'<p><label>曜日 <select name=days>{opts}</select></label> {checks}</p>'
         f'<p><label><input type=checkbox name=enabled value=1{" checked" if info["enabled"] else ""}> 有効(外すと一時停止)</label></p>'
         '<button type=submit>保存</button></form>'

@@ -42,4 +42,4 @@ cat <<FTR
 FTR
 } >"$OUT"
 if command -v plutil >/dev/null; then plutil -lint "$OUT" >/dev/null; fi   # macOS 以外(テスト)では lint を省く
-echo "$OUT (毎分起動。間隔 ${INTERVAL_MIN} 分 / $WINDOW / $DAYS は tick.sh が判定)"
+echo "$OUT (毎分起動。間隔 $(interval_label) / $WINDOW / $DAYS は tick.sh が判定)"

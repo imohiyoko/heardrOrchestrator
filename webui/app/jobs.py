@@ -11,7 +11,9 @@ from .sanitize import clean
 from .data import parse_jsonl, tail_lines
 
 
-HM_RE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
+# HH:MM か HH:MM:SS(秒を省いた終了時刻は、scheduler がその分の 59 秒までを含める)
+HM_RE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?")
+INTERVAL_UNITS = (("min", "分", 1440), ("sec", "秒", 86400))  # (値, 表示, 上限)
 DAY_TOKENS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 DAY_PRESETS = (("daily", "毎日"), ("weekdays", "平日"), ("weekends", "土日"))
 
@@ -26,7 +28,7 @@ def job_names():
 def job_info(name):
     """scheduler/bin/show.sh で、実際に効く設定(conf + settings)を得る。(dict, None) か (None, エラー文)。"""
     env = dict(os.environ, JOBS_DIR=SCHED_JOBS(), SCHED_SETTINGS_DIR=SCHED_SETTINGS())
-    for k in ("SCHED_WINDOW", "SCHED_START", "SCHED_END", "SCHED_INTERVAL_MIN"):
+    for k in ("SCHED_WINDOW", "SCHED_START", "SCHED_END", "SCHED_INTERVAL_MIN", "SCHED_INTERVAL_SEC"):
         env.pop(k, None)
     try:
         r = subprocess.run(["bash", os.path.join(SCHED_ROOT, "bin", "show.sh"), name], env=env,
@@ -39,6 +41,23 @@ def job_info(name):
         return json.loads(r.stdout), None
     except ValueError:
         return None, "設定を読めませんでした"
+
+
+def interval_sec(info):
+    """show.sh の結果から間隔(秒)。interval_sec が無い古い形なら interval_min から"""
+    v = info.get("interval_sec")
+    return int(v) if v is not None else int(info.get("interval_min") or 0) * 60
+
+
+def interval_text(info):
+    """表示用: 60 で割り切れれば「N 分」、そうでなければ「N 秒」"""
+    sec = interval_sec(info)
+    return f"{sec // 60} 分" if sec % 60 == 0 else f"{sec} 秒"
+
+
+def _sec_of(hms, end=False):
+    h, m, *rest = hms.split(":")
+    return int(h) * 3600 + int(m) * 60 + (int(rest[0]) if rest else (59 if end else 0))
 
 
 def job_last(name):
@@ -61,12 +80,19 @@ def save_job_settings(name, form):
         if old is not None:
             os.unlink(path)
         return None
-    iv, start, end = form.get("interval_min", "").strip(), form.get("start", "").strip(), form.get("end", "").strip()
-    if not iv.isdigit() or not 1 <= int(iv) <= 1440:
-        return "間隔は 1〜1440 分の整数で入力してください"
+    # 間隔は interval + interval_unit(min / sec)。古いフォームの interval_min も受け付ける
+    iv = form.get("interval", form.get("interval_min", "")).strip()
+    unit = form.get("interval_unit", "min")
+    units = {u: (label, hi) for u, label, hi in INTERVAL_UNITS}
+    if unit not in units:
+        return "間隔の単位が不正です"
+    label, hi = units[unit]
+    if not iv.isdigit() or not 1 <= int(iv) <= hi:
+        return f"間隔は 1〜{hi} {label}の整数で入力してください"
+    start, end = form.get("start", "").strip(), form.get("end", "").strip()
     if not HM_RE.fullmatch(start) or not HM_RE.fullmatch(end):
-        return "開始・終了は HH:MM で入力してください"
-    if start > end:
+        return "開始・終了は HH:MM か HH:MM:SS で入力してください"
+    if _sec_of(start) > _sec_of(end, end=True):
         return "開始は終了より前にしてください(日またぎは未対応)"
     days = form.get("days", "")
     if days == "custom":
@@ -78,7 +104,7 @@ def save_job_settings(name, form):
         return "曜日の指定が不正です"
     enabled = "1" if form.get("enabled") == "1" else "0"
     body = f"# Web UI が書く上書き設定({time.strftime('%Y-%m-%dT%H:%M:%S%z')})\n" \
-           f"INTERVAL_MIN={int(iv)}\nSTART={start}\nEND={end}\nDAYS={days}\nENABLED={enabled}\n"
+           f"{'INTERVAL_SEC' if unit == 'sec' else 'INTERVAL_MIN'}={int(iv)}\nSTART={start}\nEND={end}\nDAYS={days}\nENABLED={enabled}\n"
     os.makedirs(SCHED_SETTINGS(), exist_ok=True)
     tmp = path + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
