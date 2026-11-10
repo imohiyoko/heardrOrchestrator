@@ -1,6 +1,6 @@
 # heardrOrchestrator
 
-Building blocks for running several Claude agents on herdr: one **conductor** agent, a **task board**, a read-only **web UI**, and a **scheduler** for periodic prompts.
+Building blocks for running several Claude agents on herdr: one **conductor** agent, a **task board**, a mostly read-only **web UI** (it can also stop / revive / create agents), and a **scheduler** for periodic prompts.
 
 ```
 conductor  <--- reports ---  workers (herdr panes)
