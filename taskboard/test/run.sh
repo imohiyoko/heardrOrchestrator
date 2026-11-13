@@ -3,7 +3,7 @@
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-export TB_DB=$TMP/tasks.db TB_CONFIG=$TMP/projects.conf
+export TB_DB=$TMP/tasks.db TB_CONFIG=$TMP/projects.conf TB_LIMITS=$TMP/limits-default.conf
 export HERDR_BIN=$HERE/fake-herdr FAKE_LOG=$TMP/herdr.log
 TB=$HERE/../bin/tb
 : >"$FAKE_LOG"

@@ -22,6 +22,11 @@ case "$1 $2" in
     echo "workspace-create $*" >>"${FAKE_LOG:?}"
     [[ ${FAKE_WS_FAIL:-0} == 1 ]] && { echo '{"error":{"code":"x"}}'; exit 1; }
     echo "{\"result\":{\"workspace\":{\"workspace_id\":\"wN\"},\"root_pane\":{\"pane_id\":\"${FAKE_NEW_PANE:-wA:p1}\"}}}";;
+  "workspace list")
+    echo "workspace-list" >>"${FAKE_LOG:?}"
+    [[ ${FAKE_WS_LIST_FAIL:-0} == 1 ]] && { echo '{"error":{"code":"x"}}'; exit 1; }
+    # FAKE_WORKSPACES(JSON 配列。例 [{"label":"inc-001"}])。既定は空
+    printf '{"result":{"workspaces":%s},"type":"workspace_list"}\n' "${FAKE_WORKSPACES:-[]}";;
   "workspace close")
     echo "workspace-close $3" >>"${FAKE_LOG:?}";;
   "pane close")

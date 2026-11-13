@@ -57,8 +57,11 @@ alert_dispatch_one() {  # $1=alerts.id(数字)
     approval_of "alert:analyze"
     if [[ $APPROVAL_VALUE != allow ]]; then sql "UPDATE alerts SET status='awaiting-approval' WHERE id=$id;"; return 0; fi
   fi
-  local busy; busy=$(sql "SELECT COUNT(*) FROM alerts WHERE status='analyzing';")
-  if (( busy >= ANALYST_MAX )); then sql "UPDATE alerts SET status='queued' WHERE id=$id;"; return 0; fi
+  local busy amax=$ANALYST_MAX; busy=$(sql "SELECT COUNT(*) FROM alerts WHERE status='analyzing';")
+  limit_is_set analyst_max && amax=$(limit_get analyst_max)   # limits で設定されていれば TB_ANALYST_MAX より優先
+  if (( busy >= amax )); then sql "UPDATE alerts SET status='queued' WHERE id=$id;"; return 0; fi
+  # 動作中の agent の総数(max_running_agents)。上限なら作らず queued に戻す(枠が空いたら tb alert-dispatch で進む)
+  if ! limits_refuse_running 1 2>/dev/null; then sql "UPDATE alerts SET status='queued', note='max_running_agents に達しているため待機' WHERE id=$id;"; return 0; fi
   start_analyst "$id"
 }
 

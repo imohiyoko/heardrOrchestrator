@@ -12,3 +12,4 @@ token
 scheduler/jobs/*.conf
 scheduler/settings/
 taskboard/config/spawn-rules.txt
+taskboard/config/limits.conf

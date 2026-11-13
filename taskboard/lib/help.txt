@@ -91,3 +91,19 @@ tb agent-spawn <役割> --task <task-id> --brief <依頼の本文(2000 字まで
 tb spawn-freeze     自動承認を止める。以後の agent-spawn は全部人の承認待ち(人の端末からだけ)
 tb spawn-unfreeze   解除する(人の端末からだけ)
          子の tb comment には spawned_by: <親> が付く。tb digest は子の数が上限の 1 つ手前以上のときと、親のタスクが done/blocked なのに子が動いているときに知らせる
+
+制限(動作 agent 数など。config/limits.conf は人だけが編集。優先は 環境変数 TB_LIMIT_<キー大文字> > limits.conf > 既定):
+tb limits [show] [--json|--line]   1 行の現況(例: running 17/30  working 6/無制限  incidents 1/2  analysts 1/2  spawn 1/4  mode normal)と、各キーの値と出どころ
+tb limits set <キー> <値>          検査して limits.conf に書く(人の端末からだけ)。キー: max_running_agents max_working_agents incident_max_open
+                                   incident_roles analyst_max spawn_max_per_parent spawn_max_total watchers human_handoff。リストは空白かカンマ区切り
+tb limits unset <キー>             limits.conf から消す(既定に戻る。人だけ)
+tb limits mode normal|lean|minimal   まとめて絞る・戻す(人だけ。値の表は lib/limits.sh の先頭)
+tb limits get <キー>               今の値だけを出す
+tb limits check incident-open|running   上限の検査だけ(0 ok / 4 上限 / 1 確かめられない)。agent をまとめて起動するスクリプトが、作る前に呼ぶ
+tb limits watcher-enabled <名前>   watchers に入っていれば終了コード 0、無ければ 1(scheduler のジョブのガード用)
+tb agent-shed [--count N] [--json]   絞る(止める)候補を、完了済みで待機中 → 止めてよい判定(stale でない)→ 解析役・親が終わった子 の順に一覧にする。
+                                   読み取り専用(何も止めない)。各行に実行する tb agent-stop <名前> を出す(止めてよい判定が無いものは --force 付き。人だけ)
+
+他の人への調査依頼(human_handoff が on のときだけ。agent は誰にも連絡しない):
+tb handoff <task-id>   人が貼る依頼文(目的・必要なアクセス・期限・返し先)を data/handoff/<task-id>.md に書くだけ。何も送らない。
+                       off なら終了コード 4。文面に秘密らしい文字列(トークン、AWS キー、秘密鍵のヘッダ)があれば書かずに 4(題名・要約を直してやり直す)

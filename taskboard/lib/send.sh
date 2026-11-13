@@ -78,6 +78,7 @@ outbox_deliver() {  # $1=outbox.id → 0 送信済み / 10 / 11
   from=$(jq -r .from_name <<<"$row"); pane=$(jq -r .from_pane <<<"$row"); target=$(jq -r .target <<<"$row")
   kind=$(jq -r .kind <<<"$row"); tid=$(jq -r '.task_id // "-"' <<<"$row"); text=$(jq -r .text <<<"$row")
   msg="[from: $from / $pane / $tid / $kind] $(oneline "$text" "$SEND_MAX")"
+  limits_send_gate "$target" || { log_message send "O-$oid" "$target" "$msg" busy; return 10; }   # max_working_agents: 待たせる(queued のまま)
   herdr_send "$target" "$msg" "O-$oid" send || return $?
   sql "UPDATE outbox SET status='sent', sent_at=$(q "$(now)") WHERE id=$oid;"
 }

@@ -240,6 +240,48 @@ tb spawn-freeze / tb spawn-unfreeze                                        # 人
 - 親子は `agents.spawned_by` / `spawn_task` に残る。子の `tb comment` は指揮官への本文の先頭に `spawned_by: <親>` が付く
 - `tb digest` が知らせる: 子の数が上限の 1 つ手前以上(全体、または 1 体の親)/ 親のタスクが done・blocked なのに子が動いている。子がいなければ何も出さない
 
+## 制限(動作 agent 数など)
+
+動作中の agent の数や、障害・解析役・子 agent の同時数を、人が 1 か所で絞れるようにする。値は `config/limits.conf`(人だけが編集。再起動は要らない。tb が毎回読む)。
+無ければ `limits.conf.example`、それも無ければ組み込みの既定を使う。優先は **環境変数 `TB_LIMIT_<キー大文字>` > `limits.conf` > 既定**。
+
+| キー | 既定 | 意味 |
+|---|---|---|
+| `max_running_agents` | 30 | 動作中(停止中は数えない)の agent の総数。超えるときは、`agent-new` / `agent-revive` / `agent-spawn` / 障害 workspace / 解析役のどれも、作らずに理由を出す(終了コード 4) |
+| `max_working_agents` | 0(無制限) | 同時に working の agent の数。超えたら、working でない宛先への `tb send` は outbox で待たせる(終了コード 10。`tb flush` で再送) |
+| `incident_max_open` | 2 | 同時に開く障害 workspace(herdr の `inc-<3 桁>`)の数 |
+| `incident_roles` | investigator containment fixer lateral verifier | 障害を開いたとき、すぐ起動する役。残りは、必要になったら指揮官が `tb agent-new inc<ID>-<役> --role <役>` で起動する |
+| `analyst_max` | 2 | 解析役の同時数。**limits で設定したときだけ** `TB_ANALYST_MAX` より優先 |
+| `spawn_max_per_parent` / `spawn_max_total` | 2 / 4 | `agent-spawn` の子。**limits で設定したときだけ** `spawn-policy.conf` の `max_children_per_parent` / `max_children_total` より優先(未設定なら `spawn-policy.conf` がそのまま効く。その既定は 2 / 6) |
+| `watchers` | watch | 動かす見張りの名前。空にすると見回りのジョブは何もせず終わる |
+| `human_handoff` | off | 他の人に調査を頼む文面(`tb handoff`)を使うか |
+
+「動作中」は台帳(`agents`)で running のもの(herdr と同期した後。停止中は数えない)で、「作業中」はそのうち herdr の状態が working のもの。**数えるのは tb が向いている herdr セッション(`HERDR_SESSION`)の行だけ**で、別セッションの行は数えず、`agent-shed` の候補にも出さない。
+
+```bash
+tb limits                                 # running 17/30  working 6/無制限  incidents 1/2  analysts 1/2  spawn 1/4  mode normal + 各キーの値と出どころ
+tb limits show --json                     # 同じ内容を JSON で(Web UI などから読み取りだけで使える)
+tb limits set <キー> <値>                  # 検査して limits.conf を書く(人だけ。agent の pane からは拒否)。リストは空白かカンマ区切り
+tb limits unset <キー>                     # limits.conf から消す(既定に戻る)
+tb limits mode normal|lean|minimal        # まとめて絞る・戻す(人だけ)
+tb limits check incident-open|running     # 検査だけ(agent をまとめて起動するスクリプトが、作る前に呼ぶ)
+tb limits watcher-enabled <名前>          # watchers にあれば終了コード 0、無ければ 1
+tb agent-shed [--count N] [--json]        # 絞る候補の一覧。何も止めない
+```
+
+- **モード**の値は `lib/limits.sh` の先頭の表で変える。`lean`: `max_working_agents=10`、`incident_max_open=1`、`incident_roles=investigator fixer verifier`、`analyst_max=1`、`spawn_max_total=2`。
+  `minimal`: `max_working_agents=5`、`incident_max_open=1`、`incident_roles=investigator`、`analyst_max=1`、`spawn_max_total=0`、`watchers` を空に。`normal` は表のキーを `limits.conf` から消して既定に戻す
+  (`max_running_agents` と `human_handoff` はモードでは変えない)。モードを選んだ後に `set` / `unset` すると、記録されるモード名は `custom` になる
+- **絞る**: `tb agent-shed` が、止めてよい候補を ①完了報告済み(done のタスクがあり未完了が無い)で待機中の役 ②判定役が `killable=yes` とし、その後に新しい入力が無い(`stale` でない)もの
+  ③解析役(解析中を除く)と、親のタスクが done または親が動いていない子 の順に出し、各行に実行する `tb agent-stop <名前>` を添える(止めてよい判定が無いものには `--force` が付く。`--force` は人だけ)。止めるのは人。復活は `tb agent-revive`
+- **強制する場所**: `agent-new`・`agent-revive`・`agent-spawn`(`max_running_agents`。承認待ちの `agent-approve` でも再検査し、超えていれば承認待ちのまま残す)、障害対応の workspace をまとめて開くスクリプト(何かを作る前に `tb limits check incident-open` を呼ぶ。
+  動作中 + 起動する役の数が `max_running_agents` を超える、または開いている障害が `incident_max_open` 以上なら、何も作らず終了コード 4)、解析役の起動(`analyst_max` と `max_running_agents`。超えるときは `queued` のまま)、
+  `tb send` / `tb flush`(`max_working_agents`)。見回りのジョブは COMMAND 型で `tb limits watcher-enabled <名前> || exit 0` と書けばガードできる(`scheduler/jobs/watch.conf.example`)。scheduler のコードは変えない
+- **`tb handoff <task-id>`**: `human_handoff` が on のときだけ、人が貼る依頼文(目的・必要なアクセス・期限・成果物の返し先)を `data/handoff/<task-id>.md`(`TB_HANDOFF_DIR` で変更)に書く。何も送らない
+  (文面にも「agent は誰にも連絡しません」と書く)。題名・要約に秘密らしい文字列(トークン、AWS のアクセスキー、秘密鍵のヘッダなど)が含まれるときは書かずに終了コード 4。既にある文面は上書きしない
+
+使い始めるには(人): `cp config/limits.conf.example config/limits.conf`(コピーしなくても、`.example` の値で動く。`limits.conf` は git に載せない)。
+
 ## 会計役(定期レビュー)と改善提案
 
 会計役(`roles/auditor.md`)が scheduler の定期プロンプト(`scheduler/jobs/auditor.conf.example`)で、送受信・アラート・報告・承認・定期実行の
@@ -290,7 +332,7 @@ tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわ�
 | `lib/core.sh` | エラー終了・入力の検査・タスク行の取得・project ごとの指示役 |
 | `lib/transport.sh` | herdr との境界。herdr を実行するのはここの `herdr_call` だけ。送信と `messages` への記録(`herdr_send`)、`system-send` |
 | `lib/tasks.sh` | add / list / show / claim / update / done / block / report / pending |
-| `lib/proxy.sh` / `activity.sh` / `comments.sh` / `digest.sh` / `send.sh` / `roles.sh` / `approvals.sh` / `alerts.sh` / `review.sh` / `agents.sh` | 各節のコマンド |
+| `lib/proxy.sh` / `activity.sh` / `comments.sh` / `digest.sh` / `send.sh` / `roles.sh` / `approvals.sh` / `alerts.sh` / `review.sh` / `agents.sh` / `spawn.sh` / `limits.sh` / `shed.sh` / `handoff.sh` | 各節のコマンド |
 
 agent への送信も DB への書き込みも、すべて `tb` を通る。後で MCP サーバーなど別の経路を足すときは、`tb` のコマンドを呼ぶか `lib/transport.sh` を差し替えればよい。
 
@@ -313,7 +355,7 @@ agent への送信も DB への書き込みも、すべて `tb` を通る。後�
 
 `TB_DB`(DB パス) / `TB_CONFIG`(projects.conf) / `HERDR_BIN`(herdr の実体。既定 `herdr`) / `TB_SCHEMA_DIR`(テスト用)
 DB パスと herdr の既定値は部品で共通の [`lib/herdr-env.sh`](../lib/herdr-env.sh)(Python は `lib/herdr_env.py`)で決まる。
-`TB_ROUTES`(routes.conf) / `TB_HR_NAME`(hr) / `TB_SCHED_LOGS` / `TB_REVIEW_TOP`(8) / `TB_ANALYST_MAX`(2) / `TB_ANALYST_CWD` / `TB_ANALYST_MODEL` / `TB_AGENT_CWD` / `TB_SWEEPER_PATTERN`(`sweeper*`) / `TB_SPAWN_RETRY_SEC`(3) / `TB_APPROVALS`(approvals.conf) / `TB_ROLES`(roles/) / `TB_ROLE_MAX`(12000) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
+`TB_ROUTES`(routes.conf) / `TB_HR_NAME`(hr) / `TB_SCHED_LOGS` / `TB_REVIEW_TOP`(8) / `TB_ANALYST_MAX`(2) / `TB_ANALYST_CWD` / `TB_ANALYST_MODEL` / `TB_AGENT_CWD` / `TB_SWEEPER_PATTERN`(`sweeper*`) / `TB_LIMITS`(limits.conf) / `TB_LIMIT_<キー大文字>`(各制限の上書き) / `TB_HANDOFF_DIR`(handoff の置き場) / `TB_SPAWN_RETRY_SEC`(3) / `TB_APPROVALS`(approvals.conf) / `TB_ROLES`(roles/) / `TB_ROLE_MAX`(12000) / `TB_SEND_MAX`(4000) / `TB_IMMEDIATE_KINDS`(既定 `question blocked`) / `TB_DIGEST_IDLE_MIN`(10) / `TB_DIGEST_STUCK_MIN`(30) / `TB_DIGEST_ITEM_MAX`(160) / `TB_DIGEST_MSG_MAX`(1800)
 
 ## テスト
 

@@ -19,7 +19,7 @@ CONF=${TB_CONFIG:-$TB_ROOT/config/projects.conf}
 HERDR_BIN=${HERDR_BIN:-$HERDR_DEFAULT_BIN}
 
 # 機能ごとのファイルは taskboard/lib/。読み込む順に意味があるのは db → core → transport だけ
-for _m in db core transport tasks proxy activity comments digest send roles approvals alerts review agents spawn; do
+for _m in db core transport tasks proxy activity comments digest send roles approvals alerts review agents spawn limits shed handoff; do
   # shellcheck source=/dev/null
   source "$TB_ROOT/lib/$_m.sh"
 done

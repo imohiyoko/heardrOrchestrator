@@ -20,19 +20,21 @@ SPAWN_EXCLUDE_OP=""
 load_spawn_policy() {
   local f=$SPAWN_POLICY line k v
   [[ -f $f ]] || f=$SPAWN_POLICY.example
-  [[ -f $f ]] || return 0
-  while IFS= read -r line || [[ -n $line ]]; do
-    line=$(trim "${line%%#*}"); [[ $line == *=* ]] || continue
-    k=$(trim "${line%%=*}"); v=$(trim "${line#*=}")
-    case $k in
-      allowed_roles) SP_ROLES=${v//,/ };;
-      max_children_per_parent) [[ $v =~ ^[0-9]+$ ]] && SP_PER=$v;;
-      max_children_total) [[ $v =~ ^[0-9]+$ ]] && SP_TOTAL=$v;;
-      max_depth) [[ $v =~ ^[0-9]+$ ]] && SP_DEPTH=$v;;
-      model) [[ $v =~ $MODEL_RE ]] && SP_MODEL=$v;;
-      denied_parents) SP_DENY_PARENTS=${v//,/ };;
-    esac
-  done <"$f"
+  if [[ -f $f ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      line=$(trim "${line%%#*}"); [[ $line == *=* ]] || continue
+      k=$(trim "${line%%=*}"); v=$(trim "${line#*=}")
+      case $k in
+        allowed_roles) SP_ROLES=${v//,/ };;
+        max_children_per_parent) [[ $v =~ ^[0-9]+$ ]] && SP_PER=$v;;
+        max_children_total) [[ $v =~ ^[0-9]+$ ]] && SP_TOTAL=$v;;
+        max_depth) [[ $v =~ ^[0-9]+$ ]] && SP_DEPTH=$v;;
+        model) [[ $v =~ $MODEL_RE ]] && SP_MODEL=$v;;
+        denied_parents) SP_DENY_PARENTS=${v//,/ };;
+      esac
+    done <"$f"
+  fi
+  limits_override_spawn   # limits の spawn_max_per_parent / spawn_max_total が設定されていれば、それが優先
   return 0
 }
 
@@ -55,7 +57,7 @@ spawn_count_children() {  # $1=親(空なら全体)
   [[ -z $1 ]] || w=" AND spawned_by=$(q "$1")"
   [[ -z $1 ]] || w2=" AND json_extract(args,'\$.spawn.parent')=$(q "$1")"
   [[ -z $SPAWN_EXCLUDE_OP ]] || w2+=" AND id!=$SPAWN_EXCLUDE_OP"   # 承認時の再検査では、その操作自身を数えない
-  sql "SELECT (SELECT COUNT(*) FROM agents WHERE state='running' AND spawned_by IS NOT NULL$w)
+  sql "SELECT (SELECT COUNT(*) FROM agents WHERE state='running' AND herdr_session=$(q "$HSESS") AND spawned_by IS NOT NULL$w)
          + (SELECT COUNT(*) FROM agent_ops WHERE op='new' AND status='pending' AND json_extract(args,'\$.spawn.parent') IS NOT NULL$w2);"
 }
 
@@ -111,6 +113,8 @@ spawn_check() {
   ((own > 0)) || { SPAWN_WHY="--task $task は $parent が持つ in_progress のタスクではありません"; return 1; }
   if (( $(spawn_count_children "$parent") >= SP_PER )); then SPAWN_WHY="$parent の子の数が上限($SP_PER)です"; return 1; fi
   if (( $(spawn_count_children "") >= SP_TOTAL )); then SPAWN_WHY="全体の子の数が上限($SP_TOTAL)です"; return 1; fi
+  local running max; running=$(sql "SELECT COUNT(*) FROM agents WHERE state='running' AND herdr_session=$(q "$HSESS");"); max=$(limit_get max_running_agents)
+  if ((running >= max)); then SPAWN_WHY="動作中の agent が上限です(動作中 ${running}、max_running_agents=$max)。人が tb agent-shed の候補を止めるか、tb limits set max_running_agents <数>"; return 1; fi
   return 0
 }
 

@@ -1,0 +1,18 @@
+# 動作 agent 数などの制限(<キー> = <値>)。編集するのは人だけ(agent は書き換えない)。再起動は要らない(tb は毎回読む)。
+# 実際に読むのは limits.conf。無ければこの .example の値を使う(どちらも無ければ組み込みの既定。同じ値)。
+# 使い始めるには: cp limits.conf.example limits.conf    ※ tb limits set / tb limits mode は limits.conf を書く
+# 優先: 環境変数 TB_LIMIT_<キー大文字> > limits.conf > 既定
+# 見る: tb limits show / 絞る候補: tb agent-shed(止めるのは人が tb agent-stop)
+# 数え方: 動作中 = 停止中を除いた agent。作業中 = そのうち herdr の状態が working
+
+max_running_agents = 30      # 動作中の agent の総数。超えるときは、agent-new / agent-spawn / 障害 workspace / 解析役のどれも作らず理由を出す
+max_working_agents = 0       # 同時に作業中(working)の agent の数。0 = 無制限。超えたら、新しい依頼の送信は outbox で待たせる(tb flush で再送)
+incident_max_open = 2        # 同時に開く障害 workspace の数
+incident_roles = investigator containment fixer lateral verifier   # 障害を開いたとき、すぐ起動する役。残りは必要になったとき指揮官が tb agent-new --role で起動する
+watchers = watch   # 動かす見張りの名前。空にすると、見回りのジョブは何もせず終わる(ジョブ側で tb limits watcher-enabled <名前> を使う)
+human_handoff = off          # 他の人に調査を頼む運用(tb handoff)を使うか。on でも、文面を作るだけ。送るのは人
+
+# 次の 3 つは、設定したときだけ既存の設定より優先する(コメントのままなら、既存の設定がそのまま効く)。
+# analyst_max = 2                 # 解析役の同時数。未設定なら環境変数 TB_ANALYST_MAX(既定 2)
+# spawn_max_per_parent = 2        # agent-spawn の子: 親 1 体あたり。未設定なら spawn-policy.conf の max_children_per_parent
+# spawn_max_total = 4             # agent-spawn の子: 全体。未設定なら spawn-policy.conf の max_children_total
