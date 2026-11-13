@@ -9,6 +9,7 @@ DIGEST_IDLE_MIN=${TB_DIGEST_IDLE_MIN:-10}
 DIGEST_STUCK_MIN=${TB_DIGEST_STUCK_MIN:-30}
 DIGEST_ITEM_MAX=${TB_DIGEST_ITEM_MAX:-160}
 DIGEST_MSG_MAX=${TB_DIGEST_MSG_MAX:-1800}
+DIGEST_QUEUED_SEC=${TB_DIGEST_QUEUED_SEC:-300}   # outbox が queued のまま何秒たったら観測として載せるか
 
 # 項目の本文: 1 行化(oneline)に加え、項目の区切り(|)と角かっこラベルを無効化する
 item_text() { oneline "$1" "$2" | tr '[]|' '()/'; }
@@ -75,6 +76,14 @@ collect_digest() {
              WHERE t.status IN ('in_progress','review','blocked') AND a.last_prompt_at IS NOT NULL
                AND (a.last_stop_at IS NULL OR a.last_prompt_at > a.last_stop_at)
                AND (julianday('now') - julianday(a.last_prompt_at)) * 1440 >= $DIGEST_STUCK_MIN ORDER BY t.id;")
+  # 4b. 観測: outbox が DIGEST_QUEUED_SEC 秒以上 queued のまま(宛先に届いていない)。queued が無ければ何も出さない
+  while IFS=$'\t' read -r id owner key m; do
+    [[ -n $id ]] || continue
+    obs_seen "$key" && continue
+    add_item "$DEFAULT_TARGET" obs "O-$id" "$key" "" queued "O-$id 観測 / $owner" \
+      "O-$id が $m 分 queued のまま(宛先に届いていない。tb outbox --status queued で確認、tb flush で再送)"
+  done < <(sql -separator $'\t' "SELECT id, target, 'queued:'||id, CAST((julianday('now') - julianday(created_at)) * 1440 AS INTEGER)
+             FROM outbox WHERE status='queued' AND (julianday('now') - julianday(created_at)) * 86400 >= $DIGEST_QUEUED_SEC ORDER BY id;")
   # 5. 観測: herdr 上で blocked(承認ダイアログ待ちなど)の agent。担当タスクがあるものだけ
   if list=$(herdr_call agent list 2>/dev/null) && jq -e '.result.agents' <<<"$list" >/dev/null 2>&1; then
     local current=""
@@ -121,7 +130,7 @@ cmd_digest() {
       *) usage "digest: 不明な引数 $1";;
     esac
   done
-  [[ $DIGEST_IDLE_MIN =~ ^[0-9]+$ && $DIGEST_STUCK_MIN =~ ^[0-9]+$ ]] || usage "TB_DIGEST_IDLE_MIN / TB_DIGEST_STUCK_MIN は数字"
+  [[ $DIGEST_IDLE_MIN =~ ^[0-9]+$ && $DIGEST_STUCK_MIN =~ ^[0-9]+$ && $DIGEST_QUEUED_SEC =~ ^[0-9]+$ ]] || usage "TB_DIGEST_IDLE_MIN / TB_DIGEST_STUCK_MIN / TB_DIGEST_QUEUED_SEC は数字"
   ((dry)) || cmd_flush >/dev/null 2>&1 || true   # 積まれた下りの送信も届ける(結果は outbox / messages に残る)
   ((dry)) || cmd_alert-dispatch >/dev/null 2>&1 || true   # 承認・上限待ちのアラートを進める
   if ! ((dry)); then   # 設定役に届いていない提案を再送

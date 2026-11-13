@@ -3,6 +3,7 @@
 case "$1 $2" in
   "agent get")
     echo "get $3" >>"${FAKE_LOG:?}"
+    [[ -n ${FAKE_SESSION_LOG:-} ]] && echo "session=${HERDR_SESSION:-}" >>"$FAKE_SESSION_LOG"
     if [[ ${FAKE_STATUS:-idle} == missing ]]; then
       echo '{"error":{"code":"agent_not_found","message":"not found"}}'; exit 1
     fi

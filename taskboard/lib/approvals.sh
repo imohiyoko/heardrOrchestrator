@@ -83,8 +83,13 @@ cmd_approve() {
   kind=$(jq -r .kind <<<"$row"); target=$(jq -r .target <<<"$row")
   sql "UPDATE outbox SET status='queued', reason=reason||' / 人が承認 $(now)' WHERE id=$oid;"
   ((always)) && set_approval allow "send:$kind:$target" >/dev/null && echo "send:$kind:$target = allow(今後は承認なし)"
-  local r=0; outbox_deliver "$oid" >/dev/null || r=$?
-  case $r in 0) echo "O-$oid approved and sent to $target";; *) echo "O-$oid approved (宛先使用中のため queued。tb flush で届く)";; esac
+  local r=0; outbox_deliver_default "$oid" >/dev/null || r=$?
+  case $r in
+    0) echo "O-$oid approved and sent to $target";;
+    11) echo "tb: O-$oid は承認済みですが宛先 '$target' に届けられません(上の理由を見てください。queued のまま。直したら tb flush)" >&2
+        echo "O-$oid approved but delivery failed (queued)"; return 11;;
+    *) echo "O-$oid approved (宛先使用中のため queued。tb flush で届く)";;
+  esac
   return 0
 }
 cmd_reject() {

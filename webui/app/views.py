@@ -9,7 +9,7 @@ from urllib.parse import quote, unquote, urlencode
 from .config import DISPATCH, HERDR_ROOT, JOB_RE, REFRESH_SEC, SCHED_LOGS, STALL_MIN
 from .sanitize import clean, e
 from .herdr import agent_key, agent_session, get_agents, read_agent, workspace_label
-from .data import NOTIFY_POLL_SEC, activity_for, agent_ops, agent_registry, stopped_agents, db_conn, needs_human, parse_jsonl, q, stalled, tail_lines, tasks_for_agent, urgent_items
+from .data import NOTIFY_POLL_SEC, QUEUED_WARN_SEC, outbox_rows, activity_for, agent_ops, agent_registry, stopped_agents, db_conn, needs_human, parse_jsonl, q, stalled, tail_lines, tasks_for_agent, urgent_items
 from .actions import NOTE_MAX
 from .jobs import DAY_PRESETS, DAY_TOKENS, INTERVAL_UNITS, interval_sec, interval_text, job_info, job_last, job_names
 from . import docs
@@ -38,7 +38,7 @@ code{background:#eaeef2;padding:1px 4px;border-radius:3px}
 .doc h2.md{font-size:20px;border-bottom:1px solid #d0d7de}.doc ul,.doc ol{padding-left:1.5em}.err{background:#ffebe9;border:1px solid #cf222e;padding:6px 10px}
 """
 NAV = [("/", "概要"), ("/notifications", "緊急通知"), ("/agents", "agent"), ("/tasks", "タスク"),
-       ("/inbox", "報告・承認待ち"), ("/docs", "ドキュメント"), ("/jobs", "定期実行"), ("/ledger", "台帳")]
+       ("/inbox", "報告・承認待ち"), ("/outbox", "送信"), ("/docs", "ドキュメント"), ("/jobs", "定期実行"), ("/ledger", "台帳")]
 
 
 def page(title, body, path, badge, logout="", refresh=True, scripts=()):
@@ -487,6 +487,31 @@ def page_ledger(_qs):
     return "台帳 (直近 30 件)", table(["時刻", "action", "宛先", "profile", "承認", "送った内容(先頭)", "結果"], rows)
 
 
+def age_label(sec):
+    if sec is None:
+        return "?"
+    if sec < 60:
+        return f"{sec} 秒"
+    if sec < 3600:
+        return f"{sec // 60} 分"
+    if sec < 86400:
+        return f"{sec // 3600} 時間"
+    return f"{sec // 86400} 日"
+
+
+def page_outbox(_qs):
+    """tb send の一覧(読み取り専用)。承認・却下・送信の操作は置かない(承認は手元の tb approve)。"""
+    rows = []
+    for o in outbox_rows():
+        st = f'<span class=warn>{e(o["status"])}</span>' if o["stuck"] else e(o["status"])
+        age = f'<span class=warn>{e(age_label(o["age_sec"]))}</span>' if o["stuck"] else e(age_label(o["age_sec"]))
+        rows.append([f"O-{o['id']}", st, e(o["from_name"]), e(o["target"]), e(o["kind"]), e(o["task_id"]), age, e(o["text"])])
+    body = table(["id", "状態", "from", "宛先", "種別", "タスク", "経過", "本文(先頭 80 文字)"], rows)
+    body += (f"<p class=note>新しい順に最大 100 件。queued のまま {QUEUED_WARN_SEC} 秒を超えたものは赤で強調"
+             "(scheduler の flush が止まっていないか見てください)。承認は手元で tb approve。この画面からは操作できません。</p>")
+    return "送信 (outbox)", body
+
+
 def page_notifications(_qs):
     items = urgent_items()
     body = ("<p>10 分おきのまとめ送信を待たずに知らせるものです。開いている間、"
@@ -633,7 +658,7 @@ def _doc_body(text, ext, raw_mode, base_q, ctx):
 
 
 STATIC = {"/": page_overview, "/notifications": page_notifications, "/tasks": page_tasks, "/inbox": page_inbox,
-          "/jobs": page_jobs, "/ledger": page_ledger}
+          "/outbox": page_outbox, "/jobs": page_jobs, "/ledger": page_ledger}
 
 
 def route(path, qs, ctx=None):

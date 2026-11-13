@@ -8,12 +8,19 @@ herdr_call() { "$HERDR_BIN" "$@"; }
 
 # 宛先の状態を見て、idle/done のときだけ送る。0=送信済み 10=宛先が使用中 11=状態取得/送信の失敗
 herdr_send() {  # $1=宛先 $2=本文 $3=ログ用 ID [$4=種別(report|comment|digest|send)]
-  local target=$1 msg=$2 id=$3 kind=${4:-report} st out
-  st=$(herdr_call agent get "$target" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null) || st=""
+  local target=$1 msg=$2 id=$3 kind=${4:-report} st out raw ecode
+  raw=$(herdr_call agent get "$target" 2>/dev/null) || true
+  st=$(jq -r '.result.agent.agent_status // empty' <<<"$raw" 2>/dev/null) || st=""
+  ecode=$(jq -r '.error.code // empty' <<<"$raw" 2>/dev/null) || ecode=""
   case $st in
     idle|done) ;;
     "") log_message "$kind" "$id" "$target" "$msg" failed
-        echo "tb: 宛先 '$target' の状態を取得できません。未送信(pending に残す): $id" >&2; return 11;;
+        if [[ $ecode == agent_not_found ]]; then
+          echo "tb: 宛先 '$target' が herdr セッション '${HERDR_SESSION:-default}' に見つかりません(セッション違いの可能性。HERDR_SESSION=<名前> で指定)。未送信: $id" >&2
+        else
+          echo "tb: 宛先 '$target' の状態を取得できません(herdr セッション '${HERDR_SESSION:-default}')。未送信(pending に残す): $id" >&2
+        fi
+        return 11;;
     *)  log_message "$kind" "$id" "$target" "$msg" busy
         echo "tb: 宛先 '$target' が $st のため送りません。未送信(pending に残す): $id" >&2; return 10;;
   esac
