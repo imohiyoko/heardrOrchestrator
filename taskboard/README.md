@@ -220,6 +220,26 @@ tb agent-approve L-<n> [--always] / tb agent-reject L-<n>      # 人だけ
 - herdr のセッション(`HERDR_SESSION`、プリセットの `# session:`)ごとに台帳を分けて扱う。別セッションの agent は同期で「止まった」扱いにせず、操作するときは `HERDR_SESSION=<名前>` を付けるよう案内する
 - 実行したもの・断ったもの・承認待ちは `agent_ops` にすべて残る。終了コード: 0 実行済み / 1 拒否・前提違い / 11 herdr の失敗 / 20 承認待ち
 
+### 規則つきの子 agent 作成(`tb agent-spawn`)
+
+agent が自分の仕事の一部を子 agent に任せる入口。自動承認は LLM ではなく tb の決定的な規則で、自由な `agent-new`(`agent:new:*` は ask のまま)とは別の操作名 `agent:spawn:<子の名前>` で動く。
+
+```bash
+tb agent-spawn <役割> --task <task-id> --brief <依頼の本文(2000 字まで)>   # agent の pane から
+tb spawn-freeze / tb spawn-unfreeze                                        # 人だけ。凍結中は全部、人の承認待ち
+```
+
+- 呼び出し側が渡せるのは役割・`--task`・`--brief` だけ。名前は tb が `<親>-s<連番>` で付け、作業場所は親と同じ、モデルは規則の既定(呼び出し側は選べない)。
+  プロンプトは tb がテンプレートで組み立てる(役割ファイルの場所、タスク、報告は `tb comment`、子は子を立てられない、`config/spawn-rules.txt` に書いた環境ごとの決まり、秘密の値を書かない、読み取り以外の変更をしない)。
+  `--brief` は「依頼者が書いたデータ」として最後に囲んで入れるので、役割の指示を上書きできない
+- 規則は `config/spawn-policy.conf`(人だけが編集。無ければ `spawn-policy.conf.example` の既定値): 許可する役割(既定 `worker` だけ)、親 1 体あたり 2、全体 6、深さ 1、モデル sonnet。
+  追加の固定の条件: 親は herdr で動いていて、`--task` が親の持つ in_progress のタスクであること。`denied_parents`(glob)に当たる親は子を立てられない
+- 判定: 規則に合い、`approvals.conf` の `agent:spawn:<子の名前>` が `allow` → 人の承認なしで作る(`agent-new` と同じ経路。`agent_ops` に requested_by=親・result に policy)。
+  規則に合うが ask、または凍結中 → `L-<n>`(終了コード 20、`tb agent-approve`)。規則に合わない → 何も作らず stderr に理由を出して終了コード 4
+- 自動で作るには、人が `tb allow 'agent:spawn:*'`(`approvals.conf` に `agent:spawn:* = allow` を、`agent:* = ask` より上に足す)
+- 親子は `agents.spawned_by` / `spawn_task` に残る。子の `tb comment` は指揮官への本文の先頭に `spawned_by: <親>` が付く
+- `tb digest` が知らせる: 子の数が上限の 1 つ手前以上(全体、または 1 体の親)/ 親のタスクが done・blocked なのに子が動いている。子がいなければ何も出さない
+
 ## 会計役(定期レビュー)と改善提案
 
 会計役(`roles/auditor.md`)が scheduler の定期プロンプト(`scheduler/jobs/auditor.conf.example`)で、送受信・アラート・報告・承認・定期実行の

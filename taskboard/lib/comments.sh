@@ -38,7 +38,10 @@ deliver_comment() {  # $1=comments.id → 0 送信済み / 10 / 11
   tid=$(jq -r .task_id <<<"$row"); kind=$(jq -r .kind <<<"$row"); text=$(jq -r .text <<<"$row")
   name=$(jq -r .from_name <<<"$row"); pane=$(jq -r .from_pane <<<"$row")
   project=$(sql "SELECT project FROM tasks WHERE id=$(q "$tid");"); target=$(target_for "$project")
-  msg="[from: $name / $pane / $tid / $kind] $(oneline "$text" 200) (詳細: tb comments $tid)"
+  # tb agent-spawn で立てた子なら、指揮官が親にも伝えられるよう親の名前を付ける(それ以外は従来のまま)
+  local sby; sby=$(sql "SELECT COALESCE(spawned_by,'') FROM agents WHERE name=$(q "$name");")
+  if [[ $sby =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then sby="spawned_by: $sby "; else sby=""; fi
+  msg="[from: $name / $pane / $tid / $kind] ${sby}$(oneline "$text" 200) (詳細: tb comments $tid)"
   herdr_send "$target" "$msg" "C-$cid" comment || return $?
   sql "UPDATE comments SET delivered_at=$(q "$(now)") WHERE id=$cid;"
   echo "C-$cid delivered to $target"

@@ -11,3 +11,4 @@ sessions.json
 token
 scheduler/jobs/*.conf
 scheduler/settings/
+taskboard/config/spawn-rules.txt

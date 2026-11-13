@@ -130,8 +130,8 @@ first_prompt() {  # $1=名前 $2=本文 $3=依頼者
 
 # ---------- 実体(引数は検査済み。結果を OP_OUT に入れて 0 / 1 / 11 を返す) ----------
 OP_OUT=""
-do_agent_new() {  # name cwd model role prompt killable by
-  local name=$1 cwd=$2 model=$3 role=$4 prompt=$5 kill=$6 by=$7
+do_agent_new() {  # name cwd model role prompt killable by [spawned_by spawn_task](tb agent-spawn のときだけ)
+  local name=$1 cwd=$2 model=$3 role=$4 prompt=$5 kill=$6 by=$7 sby=${8:-} stask=${9:-}
   agent_sync || { OP_OUT="herdr agent list に失敗しました"; return 11; }
   [[ -z $(live_row "$name") ]] || { OP_OUT="$name はすでに動いています"; return 1; }
   ! other_session "$name" || return 1
@@ -147,7 +147,7 @@ do_agent_new() {  # name cwd model role prompt killable by
     sql "DELETE FROM agents WHERE name=$(q "$name");"
     OP_OUT="$name を起動できません: $SPAWN_ERR"; return 11
   fi
-  sql "UPDATE agents SET pane_id=$(q "$SPAWN_PANE") WHERE name=$(q "$name");"
+  sql "UPDATE agents SET pane_id=$(q "$SPAWN_PANE"), spawned_by=NULLIF($(q "$sby"),''), spawn_task=NULLIF($(q "$stask"),'') WHERE name=$(q "$name");"
   OP_OUT="$name started (pane $SPAWN_PANE, cwd $cwd${model:+, model $model}${role:+, role $role})"
   if [[ -n $prompt ]]; then first_prompt "$name" "$prompt" "$by" || OP_OUT+=" / 最初の指示は未送信(起動待ち。tb send などで送り直す)"; fi
   return 0
@@ -210,7 +210,8 @@ run_op() {  # $1=op $2=対象 $3=args $4=依頼者
   local a=$3
   case $1 in
     new)    do_agent_new "$2" "$(jq -r '.cwd // ""' <<<"$a")" "$(jq -r '.model // ""' <<<"$a")" "$(jq -r '.role // ""' <<<"$a")" \
-                         "$(jq -r '.prompt // ""' <<<"$a")" "$(jq -r '.killable // "unknown"' <<<"$a")" "$4";;
+                         "$(jq -r '.prompt // ""' <<<"$a")" "$(jq -r '.killable // "unknown"' <<<"$a")" "$4" \
+                         "$(jq -r '.spawn.parent // ""' <<<"$a")" "$(jq -r '.spawn.task // ""' <<<"$a")";;
     stop)   do_agent_stop "$2" "$(jq -r '.force // 0' <<<"$a")" "$4";;
     revive) do_agent_revive "$2" "$(jq -r '.fresh // 0' <<<"$a")" "$(jq -r '.model // ""' <<<"$a")" "$(jq -r '.prompt // ""' <<<"$a")" "$4";;
     *) OP_OUT="不明な操作: $1"; return 1;;
@@ -385,6 +386,7 @@ cmd_agent-approve() {
   [[ -n $row ]] || die "操作が見つかりません: L-$id"
   [[ $(jq -r .status <<<"$row") == pending ]] || die "L-$id は承認待ちではありません($(jq -r .status <<<"$row"))"
   op=$(jq -r .op <<<"$row"); target=$(jq -r .target <<<"$row"); args=$(jq -r .args <<<"$row"); by=$(jq -r .requested_by <<<"$row")
+  if [[ $op == new && -n $(jq -r '.spawn.parent // ""' <<<"$args") ]]; then spawn_recheck "$id" "$args" || return 1; fi
   ((always)) && set_approval allow "agent:$op:$target" >/dev/null && echo "agent:$op:$target = allow(今後は承認なし)"
   run_op "$op" "$target" "$args" "$by" || r=$?
   record_op "$op" "$target" "$args" "$by" "$r" "$OP_OUT / 人が承認" "$id"

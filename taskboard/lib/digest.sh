@@ -23,7 +23,7 @@ add_item() {  # $1=target $2=type(comment|task|obs) $3=ref $4=key $5=task_id $6=
 obs_seen() { [[ -n $(sql "SELECT 1 FROM observations WHERE key=$(q "$1");") ]]; }
 
 collect_digest() {
-  local r tid kind from text dels project id owner summary key m pane sess name list task
+  local r tid kind from text dels project id owner summary key m pane sess name list task sby
   # 1. 未配送の報告コメント(kind を問わない。即時送信に失敗したものもここで回収)
   while IFS= read -r r; do
     [[ -n $r ]] || continue
@@ -31,8 +31,10 @@ collect_digest() {
     from=$(jq -r .from_name <<<"$r"); text=$(jq -r .text <<<"$r"); project=$(jq -r '.project // ""' <<<"$r")
     dels=$(jq -r '.deliverables | fromjson | join(", ")' <<<"$r")
     [[ -n $dels ]] && text+=" / 成果物: $dels"
+    sby=$(jq -r '.spawned_by // ""' <<<"$r"); [[ -z $sby ]] || from+=" (spawned_by: $sby)"
     add_item "$(target_for "$project")" comment "C-$id" "" "$tid" "" "$tid $kind / $from" "$text"
-  done < <(sql -json "SELECT c.*, t.project FROM comments c LEFT JOIN tasks t ON t.id=c.task_id
+  done < <(sql -json "SELECT c.*, t.project, ag.spawned_by FROM comments c LEFT JOIN tasks t ON t.id=c.task_id
+             LEFT JOIN agents ag ON ag.name=c.from_name
              WHERE c.delivered_at IS NULL ORDER BY c.id;" | jq -c '(. // [])[]')
   # 2. done なのに未報告のタスク
   while IFS= read -r r; do
@@ -102,6 +104,40 @@ collect_digest() {
     # blocked でなくなった agent の記録は消す(再び blocked になったら、また送る)
     sql "DELETE FROM observations WHERE kind='blocked' AND key NOT IN (${current}'');"
   fi
+  collect_spawn_obs
+}
+
+# 6. 観測: tb agent-spawn の子。何も無ければ(子が動いていなければ)何も出さない
+#    - 子の数が上限の 1 つ手前以上(全体、または 1 体の親)
+#    - 親のタスクが done / blocked になったのに、子がまだ動いている
+collect_spawn_obs() {
+  [[ -n $(sql "SELECT 1 FROM agents WHERE spawned_by IS NOT NULL AND state='running' LIMIT 1;") ]] || { sql "DELETE FROM observations WHERE kind IN ('spawnlimit','spawnorphan');"; return 0; }
+  agent_sync 2>/dev/null || true
+  load_spawn_policy
+  local current="" id parent n key project task st
+  n=$(sql "SELECT COUNT(*) FROM agents WHERE spawned_by IS NOT NULL AND state='running';")
+  if ((SP_TOTAL > 0 && n >= SP_TOTAL - 1)); then
+    key="spawnlimit:total:$n"; current+="$(q "$key"),"
+    obs_seen "$key" || add_item "$DEFAULT_TARGET" obs "spawn" "$key" "" spawnlimit "spawn 観測 / 全体" \
+      "子 agent が $n 体動いている(上限 ${SP_TOTAL}。tb agents で確認、止めるのは tb agent-stop)"
+  fi
+  while IFS=$'\t' read -r parent n; do
+    [[ -n $parent ]] || continue
+    ((SP_PER > 0 && n >= SP_PER - 1)) || continue
+    key="spawnlimit:$parent:$n"; current+="$(q "$key"),"
+    obs_seen "$key" || add_item "$DEFAULT_TARGET" obs "spawn" "$key" "" spawnlimit "spawn 観測 / $parent" \
+      "$parent の子が $n 体動いている(1 体の親あたりの上限 $SP_PER)"
+  done < <(sql -separator $'\t' "SELECT spawned_by, COUNT(*) FROM agents WHERE spawned_by IS NOT NULL AND state='running' GROUP BY spawned_by ORDER BY spawned_by;")
+  while IFS=$'\t' read -r id parent task st project; do
+    [[ -n $id ]] || continue
+    key="spawnorphan:$id:$task:$st"; current+="$(q "$key"),"
+    obs_seen "$key" && continue
+    add_item "$(target_for "$project")" obs "$task" "$key" "$task" spawnorphan "$task 観測 / $parent" \
+      "親のタスクが $st になったが、子 $id はまだ動いている(止めるなら tb agent-stop $id)"
+  done < <(sql -separator $'\t' "SELECT a.name, a.spawned_by, a.spawn_task, t.status, t.project FROM agents a JOIN tasks t ON t.id=a.spawn_task
+             WHERE a.spawned_by IS NOT NULL AND a.state='running' AND t.status IN ('done','blocked') ORDER BY a.name;")
+  # 条件が外れたものは記録を消す(再び当てはまったら、また送る)
+  sql "DELETE FROM observations WHERE kind IN ('spawnlimit','spawnorphan') AND key NOT IN (${current}'');"
 }
 
 # 1 通分の本文を組み立てる。長さの上限に収まる項目だけを入れ、残りは次回に回す
