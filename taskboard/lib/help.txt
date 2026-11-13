@@ -124,6 +124,15 @@ tb notify ack N-<n> <hash> [--id X]   notifier agent(か人)が、投稿した�
                               送った本文と合わなければ警告のイベントを積む(終了コード 1)。ack が来ないものは再送し、上限で failed
 tb notify hash '<本文>'       本文の hash(12 桁)を出す
 tb notify event incident_opened|incident_closed <ID> [--title T] [--severity S]   障害の開・閉を積む(人だけ。障害対応の workspace を開く・閉じるスクリプトから使う)
+tb pr-queue add --branch <接頭辞>/<名> --body-file <本文> --title <題> [--repo <org/repo>] [--task T-…]   draft PR の依頼を置く(agent)。pending
+tb pr-queue list [--status S] [--json] / show <PQ-n>   キューを見る
+tb pr-queue approve <PQ-n> / reject <PQ-n> [-m 理由]   人だけ。approve は本文・題・差分のガードも通ったときだけ
+tb pr-queue run [--dry-run]   approved だけを処理(scheduler の COMMAND ジョブ)。ガード: ブランチが branch_prefix で始まる・base は main 固定・
+                              draft のみ・本文が body_root の中の実ファイルで承認後に変わっていない・1 行目が body_first_line に合う(設定時)・
+                              秘密らしい値なし・同じ head の PR なし・許可リスト(config/repos.md)のリポジトリ。
+                              PR_QUEUE_REPO_DIR(clone)があれば差分も見る(CI 設定・AdministratorAccess の追加・秘密らしい値は人に回す)。
+                              gh は PR_QUEUE_GH で差し替え。マージ・approve・ready はできない。設定は config/pr-queue.conf
+tb pr-queue scan [--dry-run] [--repo <org/repo>]   origin の <branch_prefix>* を走査し、<body_root>/pr-body-<名>.md があるものを積む(run の前に呼ぶ)
 tb pr-watch                   許可リスト(config/repos.md、TB_REPOS_FILE)の PR を gh の読み取りだけで見て、新規・approve・変更依頼・マージを積む
                               (scheduler の COMMAND ジョブ。許可リストが空・notify が off なら何もせず 0。初回は基準線の記録だけ)
          外へ出るのは tb が整形した 1 行の本文だけ(タスク ID・重大度・要約・成果物のパス)。秘密らしい値を含むものは slack / webhook に出さない。

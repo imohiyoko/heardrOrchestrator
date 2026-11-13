@@ -15,3 +15,4 @@ taskboard/config/spawn-rules.txt
 taskboard/config/limits.conf
 taskboard/config/notify.conf
 taskboard/config/repos.md
+taskboard/config/pr-queue.conf
