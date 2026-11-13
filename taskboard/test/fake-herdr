@@ -26,7 +26,15 @@ case "$1 $2" in
     [[ ${FAKE_LIST_FAIL:-0} == 1 ]] && { echo '{"error":{"code":"x"}}'; exit 1; }
     # FAKE_AGENTS(JSON 配列)で差し替え可。既定は worker1(wW:p1) と名前なし(wW:p2)
     default='[{"pane_id":"wW:p1","name":"worker1","agent_session":{"value":"sess-w1"}},{"pane_id":"wW:p2","agent_session":{"value":"sess-w2"}}]'
-    printf '{"result":{"agents":%s},"type":"agent_list"}\n' "${FAKE_AGENTS:-$default}";;
+    list=${FAKE_AGENTS:-$default}
+    # FAKE_DYNAMIC=1: pane close で一覧から消え、agent start(--resume の session を引き継ぐ)で一覧に載る。再起動のテスト用
+    if [[ ${FAKE_DYNAMIC:-0} == 1 ]]; then
+      touch "$FAKE_LOG.closed" "$FAKE_LOG.started"
+      closed=$(jq -Rsc 'split("\n") | map(select(. != ""))' "$FAKE_LOG.closed")
+      started=$(jq -sc '.' "$FAKE_LOG.started")
+      list=$(jq -c --argjson c "$closed" --argjson s "$started" '[.[] | select(.pane_id as $p | $c | index($p) | not)] + $s' <<<"$list")
+    fi
+    printf '{"result":{"agents":%s},"type":"agent_list"}\n' "$list";;
   "agent prompt")
     printf 'prompt %s\t%s\n' "$3" "$4" >>"${FAKE_LOG:?}"
     if [[ ${FAKE_PROMPT_RC:-0} != 0 ]]; then echo '{"error":{"code":"x"}}'; exit "$FAKE_PROMPT_RC"; fi
@@ -46,9 +54,20 @@ case "$1 $2" in
     echo "workspace-close $3" >>"${FAKE_LOG:?}";;
   "pane close")
     echo "pane-close $3" >>"${FAKE_LOG:?}"
+    [[ ${FAKE_CLOSE_RC:-0} == 0 ]] && echo "$3" >>"$FAKE_LOG.closed"
     exit "${FAKE_CLOSE_RC:-0}";;
   "agent start")
     printf 'start %s\n' "${*:3}" >>"${FAKE_LOG:?}"
+    if [[ ${FAKE_START_RC:-0} == 0 ]]; then
+      # 起動した agent を記録(FAKE_DYNAMIC 用)。session は --resume の値。無ければ FAKE_NEW_SESSION。FAKE_START_SESSION があれば常にそれ
+      _sess=${FAKE_NEW_SESSION:-sess-new}; _pane=""; _a=("${@:4}")
+      for ((_i = 0; _i < ${#_a[@]}; _i++)); do
+        [[ ${_a[_i]} == --resume ]] && _sess=${_a[_i+1]}
+        [[ ${_a[_i]} == --pane ]] && _pane=${_a[_i+1]}
+      done
+      [[ -n ${FAKE_START_SESSION:-} ]] && _sess=$FAKE_START_SESSION
+      jq -nc --arg p "$_pane" --arg n "$3" --arg s "$_sess" '{pane_id:$p,name:$n,agent_status:"idle",agent_session:{value:$s},cwd:"/tmp"}' >>"$FAKE_LOG.started"
+    fi
     exit "${FAKE_START_RC:-0}";;
   *) echo "fake-herdr: unsupported: $*" >&2; exit 99;;
 esac
