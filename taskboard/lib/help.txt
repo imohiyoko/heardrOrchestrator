@@ -107,3 +107,20 @@ tb agent-shed [--count N] [--json]   絞る(止める)候補を、完了済み�
 他の人への調査依頼(human_handoff が on のときだけ。agent は誰にも連絡しない):
 tb handoff <task-id>   人が貼る依頼文(目的・必要なアクセス・期限・返し先)を data/handoff/<task-id>.md に書くだけ。何も送らない。
                        off なら終了コード 4。文面に秘密らしい文字列(トークン、AWS キー、秘密鍵のヘッダ)があれば書かずに 4(題名・要約を直してやり直す)
+
+外への通知(既定は off。設定は config/notify.conf、人だけが編集。優先は 環境変数 TB_NOTIFY_<キー大文字> > notify.conf > 既定。設計: drafts/notify-routes.md):
+tb notify [status] [--json]   設定(宛先の ID は表示しない)・イベントの状態を見る
+tb notify on|off              通知を入れる・止める(人の端末からだけ。notify.conf の enabled を書く)
+tb notify test                固定のダミー文を 1 通だけ送る(人だけ。off でも動く。疎通の確認用)
+tb notify dry-run             積まれているイベントを、送らずに表示する(何も送らず、何も書かない)
+tb notify tail [-n N] [-f]    stdout sink の出力(data/notify/stdout.log)を見る
+tb notify events [--status S] [--limit N] [--json]   通知イベントの一覧(blocked = 秘密を検出して外へ出さなかったもの)
+tb notify flush               承認待ち・定期まとめを積み、slack へ送る(scheduler から。人の端末か scheduler だけ)
+tb notify ack N-<n> <hash> [--id X]   notifier agent(か人)が、投稿した結果を返す。hash は tb notify hash '<投稿した本文>' で出す。
+                              送った本文と合わなければ警告のイベントを積む(終了コード 1)。ack が来ないものは再送し、上限で failed
+tb notify hash '<本文>'       本文の hash(12 桁)を出す
+tb notify event incident_opened|incident_closed <ID> [--title T] [--severity S]   障害の開・閉を積む(人だけ。障害対応の workspace を開く・閉じるスクリプトから使う)
+tb pr-watch                   許可リスト(config/repos.md、TB_REPOS_FILE)の PR を gh の読み取りだけで見て、新規・approve・変更依頼・マージを積む
+                              (scheduler の COMMAND ジョブ。許可リストが空・notify が off なら何もせず 0。初回は基準線の記録だけ)
+         外へ出るのは tb が整形した 1 行の本文だけ(タスク ID・重大度・要約・成果物のパス)。秘密らしい値を含むものは slack / webhook に出さない。
+         sink: file(data/notify/<日付>.md と sent.log)・stdout・slack(slack_via=agent|webhook)。1 分/1 時間の上限を超えた分は 1 通にまとめる

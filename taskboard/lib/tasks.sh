@@ -135,6 +135,7 @@ cmd_done() {
   dj=$(jq -nc '$ARGS.positional' --args "${dels[@]}")
   sql "UPDATE tasks SET status='done', deliverables=$(q "$dj"), summary=$(q "$summary"),
          reported_at=NULL, updated_at=$(q "$(now)") WHERE id=$(q "$id");"
+  notify_hook notify_hook_task_done "$id"
   echo "$id done (未報告。tb report $id を実行)"
 }
 
