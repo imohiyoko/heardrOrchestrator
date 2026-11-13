@@ -1,0 +1,10 @@
+# tb compact-check の設定(<キー> = <値>)。編集するのは人だけ。再起動は要らない(tb は毎回読む)。
+# 実際に読むのは compact.conf。無ければこの .example の値を使う。
+# 使い始めるには: cp compact.conf.example compact.conf して enabled = 1 にする
+# 見る: tb compact-check(既定は dry-run)/ 送る: tb compact-check --apply(scheduler/jobs/compact-runner.conf.example)
+# agent から実行するときと scheduler からの実行のどちらでも、approvals.conf の agent:compact:<名前> が allow の agent にだけ送る
+
+enabled = 0                  # 0 のあいだは何もしない(dry-run も「無効」と出すだけ)
+threshold_tokens = 150000    # 直近の入力トークン(input + cache_creation + cache_read)がこれを超えた agent が対象
+min_interval_sec = 1800      # 同じ agent に /compact を送ってから、この秒数は再び送らない
+exclude = conductor          # 対象外の agent 名(空白区切り)

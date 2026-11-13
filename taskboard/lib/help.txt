@@ -75,6 +75,7 @@ tb agent-stop <名前> [--force]   pane を閉じて止める。killable=yes(判
          --force は人だけ。止める前に session と cwd を台帳に残す
 tb agent-revive <名前> [--fresh] [--model M] [--prompt P]   台帳の session を claude --resume で再開(--fresh なら新しい会話)
 tb agent-restart <名前> [--prompt P]   MCP が切れた agent の復旧: 停止 + 同じ会話での復活。idle/done で in_progress のタスクが無いときだけ
+tb compact-check [--dry-run] [--apply]   idle/done で文脈が大きい agent に /compact を送る(既定 dry-run。config/compact.conf と approvals の agent:compact:<名前>)
          (持つなら --prompt の再開メモが要る)。人はいつでも。agent からは agent:stop と agent:revive が両方 allow の名前だけ(自分・指揮官は不可)。--force は無い
          終了コード: 0 再起動済み 1 拒否・前提違い 4 上限・許可なし 10 再開したが最初の指示を確認できない 11 herdr の失敗
 tb agent-flag <名前> --killable yes|no|unknown [--reason R]   止めてよいかの判定。判定役(TB_SWEEPER_PATTERN、既定 sweeper*)か人だけ
