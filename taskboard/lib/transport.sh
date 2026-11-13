@@ -6,6 +6,10 @@
 # herdr を実行する唯一の場所。引数はそのまま herdr CLI に渡す
 herdr_call() { "$HERDR_BIN" "$@"; }
 
+# 起動直後の準備待ちと送信の確認(lib/herdr-ready.sh。ほかのスクリプトと共有)
+# shellcheck source=../../lib/herdr-ready.sh
+source "$TB_ROOT/../lib/herdr-ready.sh"
+
 # 宛先の状態を見て、idle/done のときだけ送る。0=送信済み 10=宛先が使用中 11=状態取得/送信の失敗
 herdr_send() {  # $1=宛先 $2=本文 $3=ログ用 ID [$4=種別(report|comment|digest|send)]
   local target=$1 msg=$2 id=$3 kind=${4:-report} st out raw ecode

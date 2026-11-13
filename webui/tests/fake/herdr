@@ -13,7 +13,7 @@ case "$1 $2" in
   "workspace create") echo "workspace create $*" >>"$d/log"; echo '{"result":{"workspace":{"workspace_id":"w9"},"root_pane":{"pane_id":"w9:p1"}}}' ;;
   "agent start") echo "agent start ${*:3}" >>"$d/log" ;;
   "pane close") echo "pane close $3" >>"$d/log"; echo "$3" >>"$d/closed" ;;
-  "agent get") echo '{"result":{"agent":{"agent_status":"idle"}}}' ;;
+  "agent get") echo '{"result":{"agent":{"agent_status":"idle","interactive_ready":true}}}' ;;
   "agent prompt") echo "agent prompt $3 $4" >>"$d/log"; echo '{"result":{"type":"ok"}}' ;;
   *) echo "fake herdr: unsupported: $*" >&2; exit 2 ;;
 esac
