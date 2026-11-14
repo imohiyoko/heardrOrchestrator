@@ -75,6 +75,7 @@ cmd_comment() {
   cid=$(sql "INSERT INTO comments (task_id, kind, text, deliverables, from_name, from_pane, from_session, created_at)
     VALUES ($(q "$tid"), $(q "$kind"), $(q "$text"), $(q "$darr"), $(q "$LABEL_NAME"), $(q "$LABEL_PANE"), $(q "$LABEL_SESSION"), $(q "$(now)"));
     SELECT last_insert_rowid();")
+  notify_hook notify_hook_comment "$cid"   # 外への通知の積み込み(off なら何もしない。失敗しても結果は変わらない)
   local state=queued
   if [[ " $IMMEDIATE_KINDS " == *" $kind "* ]]; then   # 人の判断待ちはすぐ送る。それ以外は tb digest でまとめて送る
     deliver_comment "$cid" >/dev/null || rc=$?   # 保存は済んでいる。配送の結果は終了コードで返す

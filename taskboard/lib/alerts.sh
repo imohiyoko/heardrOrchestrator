@@ -43,6 +43,7 @@ cmd_alert() {
       SELECT last_insert_rowid();")
     state=new
   fi
+  [[ $state == new ]] && notify_hook notify_hook_alert_raised "$id"
   [[ $state == new ]] && { alert_dispatch_one "$id" >/dev/null 2>&1 || true; }
   if ((json)); then alert_row "$id" | jq -c '.id = "A-\(.id)"'
   else echo "A-$id $state $(sql "SELECT status FROM alerts WHERE id=$id;")"; fi
@@ -126,6 +127,7 @@ cmd_alert-result() {
   local rtext=""; if [[ -n $report ]]; then [[ -f $report && -r $report ]] || die "--report を読めません: $report"; rtext=$(head -c 50000 "$report"); fi
   sql "UPDATE alerts SET status='analyzed', severity=$(q "$sev"), result_summary=$(q "$summary"), result_report=NULLIF($(q "$rtext"),''),
          result_path=NULLIF($(q "$report"),''), result_by=$(q "$by"), analyzed_at=$(q "$(now)") WHERE id=$id;"
+  notify_hook notify_hook_alert_result "$id"
   alert_deliver "$id" >/dev/null 2>&1 || true
   # 解析役は結果を返したら用済み: 止めてよい印を付ける(停止は tb agent-stop。人か、承認された指揮官が行う)
   if [[ $by != human ]]; then

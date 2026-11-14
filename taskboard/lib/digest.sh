@@ -54,6 +54,12 @@ collect_digest() {
     add_item "$DEFAULT_TARGET" alert "A-$id" "" "" "" "A-$id 解析結果 / $sev" "$title — $summary (全文: tb alerts A-$id)"
   done < <(sql -separator $'\t' "SELECT id, severity, replace(replace(title, char(10), ' '), char(9), ' '), replace(replace(result_summary, char(10), ' '), char(9), ' ')
              FROM alerts WHERE status='analyzed' AND result_delivered_at IS NULL ORDER BY id;")
+  # 2c. 通知: 秘密らしい値を含むため外へ出さなかったイベント(人に知らせる。同じものは二度出さない)
+  while IFS=$'\t' read -r id sev; do
+    [[ -n $id ]] || continue
+    key="notify-blocked:$id"; obs_seen "$key" && continue
+    add_item "$DEFAULT_TARGET" obs "N-$id" "$key" "" notifyblock "N-$id 通知を止めた" "秘密らしい値($sev)を含むため外へ出していません(file には伏せて残した。tb notify events)"
+  done < <(sql -separator $'\t' "SELECT id, COALESCE(blocked_reason,'') FROM notify_events WHERE blocked=1 AND type!='warning' ORDER BY id;")
   # 3. 観測: turn が終わって DIGEST_IDLE_MIN 分たつのに in_progress のまま(done も報告もない)
   while IFS=$'\t' read -r id project owner key m; do
     [[ -n $id ]] || continue

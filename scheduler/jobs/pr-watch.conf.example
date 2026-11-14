@@ -1,0 +1,12 @@
+# 許可リスト(taskboard/config/repos.md の "- <org>/<repo>"。TB_REPOS_FILE で変更可)のリポジトリの PR を、gh の読み取りだけで見て、
+# 新しい PR・approve・変更依頼・マージを tb notify のキューに積む(tb pr-watch)。agent を介さず決定論的に実行。
+# 許可リストが無い・空、または tb notify が off のときは何もせず終了コード 0。
+# gh の認証は、人が用意した読み取り専用のものを使う(tb は PR の題と状態だけを見る。差分・本文は外へ出さない)。
+# HERDR_SESSION は tb が操作する herdr セッション名。環境に合わせて書き換える。
+# 注意: COMMAND は bash -c でそのまま実行される。このファイルは人が管理し、外部入力を埋め込まない。
+COMMAND='cd /path/to/taskboard && HERDR_SESSION=default bin/tb pr-watch'
+COMMAND_TIMEOUT=60
+WINDOW=00:00-23:59
+INTERVAL_SEC=120
+DAYS=daily
+TZ=Asia/Tokyo

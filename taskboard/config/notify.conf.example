@@ -1,0 +1,37 @@
+# 外への通知(tb notify)の設定(<キー> = <値>)。編集するのは人だけ(agent は書き換えない)。再起動は要らない(tb は毎回読む)。
+# 実際に読むのは notify.conf(gitignore 済み。任意)。notify.conf が無ければ既定を使う(この .example は読まない)。
+# 使い始めるには: cp notify.conf.example notify.conf して編集。on/off は tb notify on|off(notify.conf の enabled を書き換える)
+# 優先: 環境変数 TB_NOTIFY_<キー大文字> > notify.conf > 既定
+# 見る: tb notify status / 送る前の確認: tb notify dry-run / 疎通: tb notify test(固定のダミー文を 1 通)
+#
+# 秘密の値(トークン・AWS のキー ID・秘密鍵のヘッダ・key=value 形式の秘密・長い base64/16 進)の検出は、設定では変えられない。
+# 検出したイベントは slack にも webhook にも出さず、伏せた形を file にだけ残して、人(tb digest)に知らせる。
+# チャンネル ID・webhook の URL をこのファイル(.example)や公開リポジトリに書かないこと。
+
+enabled = off                # 既定は off。off のあいだは何も積まず、何も出さない
+sinks_default = file stdout slack   # file = data/notify/<日付>.md、stdout = tb notify tail、slack = 下の slack_via の経路
+# sinks_alert_raised = file slack   # 種別ごとに変えるときだけ(sinks_<種別>)。種別: alert_raised alert_result pr_opened pr_approved
+#                                   # pr_changes pr_merged question blocked done incident_opened incident_closed approvals_pending summary
+sinks_warning = file stdout  # 通知自体の警告(止めた・送れない・hash 不一致)は外へ出さない
+
+slack_via = agent            # agent = notifier agent が Slack の送信ツールで投稿する / webhook = curl で POST
+slack_target =               # 宛先のチャンネル ID(不透明な文字列)。ここには書かず、ローカルの notify.conf か環境変数 TB_NOTIFY_SLACK_TARGET に
+notifier_agent = notifier    # slack_via=agent の宛先 agent 名(herdr の agent 名)。ack を打てるのもこの agent だけ
+hash_check = on             # notifier が返す hash と送った本文の hash を突き合わせる。不一致は警告のイベント(再送しない)
+ack_timeout_min = 5         # この分数たっても ack が来なければ再送
+ack_retries = 3             # 送る回数の上限。超えたら failed(情報は file と webapp に残る)
+# webhook_file = ~/.config/<名前>/notify-webhook   # slack_via=webhook のとき。1 行目に URL。権限 0600 の通常ファイルだけ使う(リポジトリの外に置く)
+
+rate_per_min = 6            # 1 分あたりの slack への送信数。超えた分は 1 通にまとめて送る
+rate_per_hour = 60          # 1 時間あたり
+max_len = 600               # 1 通の長さの上限(字)
+dedupe_sec = 600            # 同じ種別・同じ対象のイベントを、この秒数のあいだは 1 回だけ積む(0 = 抑止しない)
+summary_interval_min = 30   # 定期まとめの間隔(分)。件数が変わっていなければ出さない(0 = 出さない)
+
+# 伏せ字。リポジトリ名・IP・アカウント ID・ホスト名は、人の決定で既定は伏せない(on にすると伏せる)
+mask_repo = off
+mask_ip = off
+mask_account = off
+mask_host = off
+mask_email = on             # メールアドレスは a***@*** にする(既定 on)
+strip_raw_logs = on         # コードの囲み・時刻つきのログ行を本文から落とし、先頭の 2 行だけ使う(既定 on)

@@ -310,6 +310,39 @@ tb roles [--json]                  # agent ごとの役割ファイル・版・�
 - 同じセッションに同じ版(`_common.md` + 役割ファイルの SHA-256)を渡し済みなら、`resume` と `role-broadcast` では送らない。compact の後は渡し直す
 - 一括送信は `[role-update / tb] ...` で始まる 1 行(ファイルの絶対パス)。宛先が使用中なら送らず、終了コード 10
 
+## 外への通知(notify / pr-watch)
+
+調査結果などを Web UI の外(チームのチャンネル、ファイル)へ流す経路。**何を・いつ・どの形で出すかは tb が決める**(決定的なコード。LLM は本文を作らない)。agent は `tb comment` / `tb alert` などで内部に書くだけで、そこから通知のイベントが自動で積まれる(通知が失敗しても元のコマンドの結果は変わらない)。設計は `drafts/notify-routes.md`。
+
+```
+tb comment / alert / done / 障害の開閉 / pr-watch / 定期 ──▶ notify_events(DB) ──▶ 整形・秘匿フィルタ・伏せ字 ──▶ file / stdout / slack
+```
+
+- **既定は off。** 使うには `config/notify.conf.example` を `config/notify.conf`(gitignore 済み・任意)にコピーして編集し、`tb notify on`(人の端末から)。優先は 環境変数 `TB_NOTIFY_<キー大文字>` > `notify.conf` > 既定
+- イベント: アラート登録 / アラートの調査結果 / PR の作成・approve・変更依頼・マージ(`tb pr-watch`) / question・blocked / done(成果物つき) / 障害の開・閉 / 承認待ち(L-/O- の番号と件数だけ) / 定期まとめ。progress と見回りの差分は積まない
+- 本文は 1 行の短い日本語(タスク ID・重大度・要約・成果物のパス)。制御文字を除き、`@here` `@channel` と `<...>` は無効化、リンクは文字列のまま。生ログ・コードの囲みは落とす(`strip_raw_logs`)
+- **秘密の値は常に止める(設定で変えられない)**: トークン・AWS のキー ID・秘密鍵のヘッダ・`key=value` 形式の秘密・長い base64/16 進を含むイベントは、slack にも webhook にも出さない。`data/notify/<日付>.md` に伏せた形だけを残し、`tb digest` で指揮官(人)に知らせる
+- 伏せ字(`mask_*`): メールは既定で伏せる。リポジトリ名・IP・アカウント ID・ホスト名は、人の決定で既定は**伏せない**(必要なら on)
+- 頻度: 1 分 6 通・1 時間 60 通(既定)。超えた分は 1 通にまとめる。同じ種別・対象は 10 分(`dedupe_sec`)に 1 回
+- sink: `file`(`data/notify/<日付>.md` と、外へ送った全文を残す `sent.log`。置き場は taskboard/data/notify(git 管理外)。`TB_NOTIFY_DIR` で変える)/ `stdout`(`tb notify tail`)/ `slack`
+  - `slack_via = agent`(既定): `tb notify flush`(scheduler の `notify-flush` ジョブ)が、整形済みの本文・hash・宛先を notifier agent へ送る(scheduler と同じ内部の送信の道なので `approvals.conf` の行は要らない)。notifier は本文をそのまま投稿し、`tb notify ack N-<n> <hash> [--id X]` で返す。hash が違えば警告、返事が無ければ再送(最大 3 回)して failed(情報は file に残る)。役は `drafts/new-roles/notifier.md`
+  - `slack_via = webhook`: 権限 0600 のファイル(`webhook_file`。リポジトリの外)の 1 行目の URL へ curl で POST。URL は引数・記録・ログに出ない
+- 宛先のチャンネル ID は `notify.conf` か環境変数にだけ書く(リポジトリに入れない。`tb notify status` も値は出さない)
+
+```bash
+tb notify status [--json]          # 設定とイベントの状態
+tb notify on|off                   # 人だけ
+tb notify test                     # 固定のダミー文を 1 通(人だけ)
+tb notify dry-run                  # 送らずに、送る内容を表示
+tb notify tail [-n N] [-f]         # stdout sink
+tb notify events [--status S] [--json]
+tb notify flush                    # 人の端末か scheduler から
+tb notify ack N-<n> <hash> [--id X]   # notifier が結果を返す
+tb pr-watch                        # 許可リストの PR を gh の読み取りだけで見る(scheduler の COMMAND ジョブ)
+```
+
+`tb pr-watch` は許可リスト `taskboard/config/repos.md`(`TB_REPOS_FILE` で変更可。git 管理外)の `- <org>/<repo>` の行のリポジトリだけを、`gh pr list` で読む。許可リストが無い・空、または notify が off なら何もせず終了コード 0。初めて見るリポジトリは基準線の記録だけで、既存の PR をイベントにしない。PR の題(短く)と状態だけを使い、本文・レビューのコメント・差分は読まない。ジョブの例は `scheduler/jobs/pr-watch.conf.example` と `notify-flush.conf.example`。
+
 ## 送信の記録
 
 tb が `herdr agent prompt` で送ろうとしたものは、結果にかかわらず `messages` に残る(`kind`=report|comment|digest|send|role|alert|scheduler|proposal、

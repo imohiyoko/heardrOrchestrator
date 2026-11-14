@@ -1,0 +1,11 @@
+# tb notify のキューを進める(tb notify flush): 承認待ち・定期まとめのイベントを積み、slack へ送る(notifier agent への依頼、返事の無いものの再送、
+# 頻度の上限を超えた分のまとめ)。file / stdout への出力はイベントを積んだ時点で済んでいる。tb notify が off のときは何もしない。
+# 宛先 agent が使用中なら次の回に回る。ack の待ち時間・再送の回数は notify.conf(ack_timeout_min / ack_retries)。
+# HERDR_SESSION は tb が操作する herdr セッション名。環境に合わせて書き換える。
+# 注意: COMMAND は bash -c でそのまま実行される。このファイルは人が管理し、外部入力を埋め込まない。
+COMMAND='cd /path/to/taskboard && HERDR_SESSION=default bin/tb notify flush'
+COMMAND_TIMEOUT=30
+WINDOW=00:00-23:59
+INTERVAL_SEC=30
+DAYS=daily
+TZ=Asia/Tokyo
