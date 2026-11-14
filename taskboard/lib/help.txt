@@ -79,3 +79,15 @@ tb agent-flag <名前> --killable yes|no|unknown [--reason R]   止めてよい�
 tb agent-ops [--status pending|done|failed|rejected] [--json]   操作の記録と承認待ち
 tb agent-approve L-<n> [--always]   承認待ちの操作を実行(--always で agent:<op>:<名前> を allow)
 tb agent-reject L-<n>
+
+規則つきの子 agent 作成(agent の pane から。自動承認は LLM ではなく tb の規則。config/spawn-policy.conf は人だけが編集):
+tb agent-spawn <役割> --task <task-id> --brief <依頼の本文(2000 字まで)>
+         子の名前は tb が <親>-s<連番> で付け、プロンプトも tb がテンプレートで組む(依頼は役割の指示を上書きできない)。
+         親は動いていて、--task が親の in_progress のタスクであること。許可する役割・子の数・深さは spawn-policy.conf
+         (既定: worker だけ、親 1 体あたり 2、全体 6、深さ 1、モデル sonnet。denied_parents に当たる親は不可)
+         終了コード: 0 作成済み(規則に合い、approvals の agent:spawn:<子の名前> が allow) 20 人の承認待ち(L-<n>。approvals が ask か spawn-freeze 中)
+                    4 規則で拒否(理由を stderr に出し、何も作らない)
+         自動で作るには人が approvals.conf に `agent:spawn:* = allow` を足す(tb allow 'agent:spawn:*')。agent:new:* は ask のまま
+tb spawn-freeze     自動承認を止める。以後の agent-spawn は全部人の承認待ち(人の端末からだけ)
+tb spawn-unfreeze   解除する(人の端末からだけ)
+         子の tb comment には spawned_by: <親> が付く。tb digest は子の数が上限の 1 つ手前以上のときと、親のタスクが done/blocked なのに子が動いているときに知らせる

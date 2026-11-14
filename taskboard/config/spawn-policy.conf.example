@@ -1,0 +1,13 @@
+# tb agent-spawn の自動承認の規則(<キー> = <値>)。編集するのは人だけ(agent は書き換えない)。
+# 実際に読むのは spawn-policy.conf。無ければ spawn-policy.conf.example の既定値を使う(どちらも無ければ、下と同じ組み込みの既定)。
+# 使い始めるには: cp spawn-policy.conf.example spawn-policy.conf
+# 自動承認になるのは、規則に合い、かつ approvals.conf で agent:spawn:<子の名前> が allow のときだけ
+# (人が tb allow 'agent:spawn:*' を実行する)。規則に合わなければ作らず拒否(終了コード 4)。
+# tb spawn-freeze 中は、規則に合うものも全部、人の承認待ちになる。
+
+allowed_roles = worker      # 子に使える役割(roles/<名前>.md)。空白かカンマ区切り。止血・修正・障害 workspace の役は入れない
+max_children_per_parent = 2 # 1 体の親が同時に持てる子の数
+max_children_total = 6      # 全体の子の数
+max_depth = 1               # 1 = 子は子を立てられない
+model = sonnet              # 子のモデル(呼び出し側は選べない)
+denied_parents =            # 子を立てられない親の名前(glob。空白区切り)。例: inc*-*(障害対応の workspace の agent など)
