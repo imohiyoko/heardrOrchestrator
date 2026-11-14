@@ -17,7 +17,7 @@ ROLE_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 SWEEPER_PAT=${TB_SWEEPER_PATTERN:-sweeper*}
 AGENT_CWD=${TB_AGENT_CWD:-$TB_ROOT/..}
 OPEN_TASK_STATUSES="'in_progress','review','blocked'"
-HSESS=${HERDR_SESSION:-default}   # herdr agent list が見せるのはこのセッションの agent だけ
+HSESS=$(herdr_session_name)   # HERDR_SOCKET_PATH > HERDR_SESSION > default(lib/herdr-env.sh)。 herdr agent list が見せるのはこのセッションの agent だけ
 
 valid_agent_name() { [[ $1 =~ $AGENT_NAME_RE ]] || usage "agent 名は英小文字で始まり、英小文字・数字・_・- の 32 字以内: $1"; }
 valid_lid() { [[ $1 =~ ^L-[0-9]+$ ]] || usage "操作 ID は L-<数字>: $1"; }

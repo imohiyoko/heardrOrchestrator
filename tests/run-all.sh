@@ -3,7 +3,7 @@
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 failed=()
-for t in tests/test_env.sh tests/test_webui_queries.py taskboard/test/run.sh webui/tests/run.sh scheduler/tests/run.sh setup/tests/run.sh; do
+for t in tests/test_env.sh tests/test_instance.sh tests/test_webui_queries.py taskboard/test/run.sh webui/tests/run.sh scheduler/tests/run.sh setup/tests/run.sh; do
   echo "=== $t"
   case $t in *.py) run=python3;; *) run=bash;; esac
   if ! $run "$ROOT/$t" >"${TMPDIR:-/tmp}/herdr-test.$$" 2>&1; then

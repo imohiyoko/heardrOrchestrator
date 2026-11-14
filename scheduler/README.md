@@ -85,4 +85,7 @@ DRY_RUN=1 NOW="2026-11-05 12:00:30" bash bin/tick.sh <job>   # 秒まで指定
 - 実行結果は `logs/<job>.log` に JSONL 1 行(`ts, job, action, reason, at, target, pane, state`)。`at` はその回の時刻(`YYYY-MM-DD HH:MM:SS`)。
   `action` は `sent | ran | skipped_state | skipped_disabled | skipped_locked | failed`。窓の外・刻みの外(`skipped_window` / `skipped_interval`)は
   DRY_RUN のときだけ出す。DRY_RUN はログを書かず stdout に出す。
+- 複数の herdr セッションを別の checkout で動かすときは、`gen-plist.sh` / `install.sh` に `TB_INSTANCE=<名前>` を付ける。
+  ラベルが `local.herdr-<名前>-sched-<job>` になり、checkout 同士で衝突しない(未設定なら従来の `local.herdr-sched-<job>`)。
+  `HERDR_SESSION` を付けて生成すると plist の環境変数に渡り、tick.sh がそのセッションの agent を見る。
 - launchd 自体の出力は `logs/launchd-<job>.out / .err`。

@@ -1,9 +1,22 @@
 #!/bin/bash
 # 使い方: bin/gen-plist.sh   -> generated/local.herdr-webui.plist を生成して lint する。
+# TB_INSTANCE があれば local.herdr-<instance>-webui(複数セッションを別 checkout で動かすとき)。
+# HERDR_SESSION / TB_UI_PORT が設定されていれば plist の環境変数に渡す(未設定なら何も足さない)。
 # launchctl への登録はしない(人が行う。README 参照)。
 set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LABEL="local.herdr-webui"
+# shellcheck source=../../lib/herdr-env.sh
+source "$ROOT/../lib/herdr-env.sh"
+LABEL="$(herdr_label_prefix)webui" || exit 2
+EXTRA_ENV=""
+for v in HERDR_SESSION TB_UI_PORT; do
+  [ -n "${!v:-}" ] || continue
+  herdr_plist_value_ok "${!v}" || { echo "error: $v は英数字と . _ - だけ: ${!v}" >&2; exit 2; }
+  [ "$v" != TB_UI_PORT ] || [[ ${!v} =~ ^[0-9]{1,5}$ ]] || { echo "error: TB_UI_PORT は数字: ${!v}" >&2; exit 2; }
+  EXTRA_ENV="$EXTRA_ENV    <key>$v</key>
+    <string>${!v}</string>
+"
+done
 OUT_DIR="${OUT_DIR:-$ROOT/generated}"
 LOG_DIR="$ROOT/logs"
 PY="${PYTHON3:-$(command -v python3)}"
@@ -27,7 +40,7 @@ cat >"$OUT" <<PLIST
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-  </dict>
+$EXTRA_ENV  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
