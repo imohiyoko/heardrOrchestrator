@@ -1,5 +1,5 @@
 #!/bin/bash
-# 使い方: gen-plist.sh <job>   -> generated/local.herdr-sched-<job>.plist
+# 使い方: gen-plist.sh <job>   -> generated/local.herdr-sched-<job>.plist(TB_INSTANCE があれば local.herdr-<instance>-sched-<job>.plist)
 # plist は毎分起動するだけ(StartCalendarInterval の空 dict = 毎分)。時間帯・間隔は tick.sh が実行時に判定するので、
 # conf や settings を変えても作り直さなくてよい。
 set -eu
@@ -8,8 +8,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 load_job "${1:-}"
 OUT_DIR="${OUT_DIR:-$SCHED_ROOT/generated}"
 
+LABEL="$(herdr_label_prefix)sched-$JOB" || exit 2   # TB_INSTANCE 未設定なら従来の local.herdr-sched-<job>
+SESS_XML=""
+if [ -n "${HERDR_SESSION:-}" ]; then   # 設定されていれば、その checkout のセッションを tick.sh に見せる。未設定なら何も足さない
+  herdr_plist_value_ok "$HERDR_SESSION" || die "HERDR_SESSION は英数字と . _ - だけ: $HERDR_SESSION"
+  SESS_XML="    <key>HERDR_SESSION</key>
+    <string>$HERDR_SESSION</string>
+"
+fi
 mkdir -p "$OUT_DIR" "$LOG_DIR"
-OUT="$OUT_DIR/local.herdr-sched-$JOB.plist"
+OUT="$OUT_DIR/$LABEL.plist"
 {
 cat <<HDR
 <?xml version="1.0" encoding="UTF-8"?>
@@ -17,7 +25,7 @@ cat <<HDR
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>local.herdr-sched-$JOB</string>
+  <string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
@@ -28,7 +36,7 @@ cat <<HDR
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-  </dict>
+$SESS_XML  </dict>
   <key>StartCalendarInterval</key>
   <dict/>
 HDR

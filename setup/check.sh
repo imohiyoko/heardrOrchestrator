@@ -16,6 +16,7 @@ ROOT="${SETUP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HERDR="${HERDR_BIN:-herdr}"
 LAUNCHCTL="${LAUNCHCTL_BIN:-launchctl}"
 LA_DIR="${LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
+LABEL_PREFIX="local.herdr-${TB_INSTANCE:+$TB_INSTANCE-}"   # lib/herdr-env.sh の herdr_label_prefix と同じ規則(未設定なら従来のラベル)
 OS="${SETUP_UNAME:-$(uname -s)}"
 
 projects=()
@@ -194,7 +195,7 @@ for ex in "$JOBS"/*.conf.example; do
   if grep -q '/path/to/' "$conf"; then
     report missing "job:$job" "$job.conf に /path/to/ が残っている" "実際のパスに書き換える"
   else report ok "job:$job" "$conf"; fi
-  launchd_check "launchd:$job" "local.herdr-sched-$job" "$ROOT/scheduler/generated/local.herdr-sched-$job.plist"
+  launchd_check "launchd:$job" "${LABEL_PREFIX}sched-$job" "$ROOT/scheduler/generated/${LABEL_PREFIX}sched-$job.plist"
 done
 # .example のない独自ジョブ
 for conf in "$JOBS"/*.conf; do
@@ -202,7 +203,7 @@ for conf in "$JOBS"/*.conf; do
   job=$(basename "$conf" .conf)
   [ -f "$JOBS/$job.conf.example" ] && continue
   report info "job:$job" "独自のジョブ: $conf"
-  launchd_check "launchd:$job" "local.herdr-sched-$job" "$ROOT/scheduler/generated/local.herdr-sched-$job.plist"
+  launchd_check "launchd:$job" "${LABEL_PREFIX}sched-$job" "$ROOT/scheduler/generated/${LABEL_PREFIX}sched-$job.plist"
 done
 
 # --- 6. Web UI --------------------------------------------------------------------
@@ -216,7 +217,7 @@ else
 fi
 [ -e "$RUN/token" ] && report warn "webui:token" "廃止された run/token が残っている" "rm webui/run/token(もう使わない)"
 if [ -f "$RUN/port" ]; then report info "webui:port" "起動中の可能性: http://127.0.0.1:$(head -c 6 "$RUN/port" | tr -cd 0-9)/"; fi
-launchd_check "launchd:webui" "local.herdr-webui" "$ROOT/webui/generated/local.herdr-webui.plist"
+launchd_check "launchd:webui" "${LABEL_PREFIX}webui" "$ROOT/webui/generated/${LABEL_PREFIX}webui.plist"
 
 # --- 7. プリセット ---------------------------------------------------------------
 n_presets=0

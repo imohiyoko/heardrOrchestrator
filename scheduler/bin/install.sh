@@ -4,7 +4,7 @@ set -eu
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cmd="${1:-}"; load_job "${2:-}"
-LABEL="local.herdr-sched-$JOB"
+LABEL="$(herdr_label_prefix)sched-$JOB" || exit 2   # TB_INSTANCE 未設定なら従来のラベル
 SRC="$SCHED_ROOT/generated/$LABEL.plist"
 DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"

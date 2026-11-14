@@ -90,6 +90,8 @@ conf="$DIR/presets/$1.conf"
 unset HERDR_SESSION HERDR_SOCKET_PATH
 session=$(session_of "$1")
 [[ -n $session ]] && export HERDR_SESSION=$session
+# launchd ラベルの instance 名も既定はセッション名(TB_INSTANCE で上書き可。default セッションは従来のラベルのまま)
+[[ -n $session && $session != default ]] && export TB_INSTANCE=${TB_INSTANCE:-$session}
 
 ensure_server
 while IFS='|' read -r label count prompt dir model; do
