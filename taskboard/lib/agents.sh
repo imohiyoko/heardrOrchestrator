@@ -119,13 +119,27 @@ record_op() {
 }
 
 # 起動直後の agent に最初の指示を送る(idle になるまで少し待つ)
+# 起動直後は herdr が idle と言っても Claude の UI が未準備で、Enter が失われることがある。
+# 準備完了(interactive_ready)を待ってから送り、送ったあと動き出したかを確かめる。
+# 0=送って動き出した 10=送れていない、または送ったが処理を確認できない(FP_NOTE に理由。本文は再送しない)
+FP_NOTE=""
 first_prompt() {  # $1=名前 $2=本文 $3=依頼者
-  local i
+  local i sent=0
+  FP_NOTE=""
+  if ! herdr_wait_ready "$1"; then
+    FP_NOTE="最初の指示は未送信(${TB_SPAWN_READY_SEC:-60} 秒待っても入力待ちになりません。tb send で送り直す)"
+    echo "tb: $1 が入力待ちにならないため最初の指示を送っていません" >&2; return 10
+  fi
   for i in 1 2 3 4 5; do
-    herdr_send "$1" "[from: tb / agent / $3] $(oneline "$2" 4000)" "agent:$1" agent 2>/dev/null && return 0
+    if herdr_send "$1" "[from: tb / agent / $3] $(oneline "$2" 4000)" "agent:$1" agent 2>/dev/null; then sent=1; break; fi
     sleep "${TB_SPAWN_RETRY_SEC:-3}"
   done
-  return 10
+  if ((! sent)); then FP_NOTE="最初の指示は未送信(tb send などで送り直す)"; return 10; fi
+  if ! herdr_verify_prompt "$1"; then
+    FP_NOTE="最初の指示は送ったが処理が始まったか確認できません(二重になるので再送せず、${1} の pane で Enter を押してください)"
+    echo "tb: $1 に送ったが処理を確認できません。pane で Enter を押してください" >&2; return 10
+  fi
+  return 0
 }
 
 # ---------- 実体(引数は検査済み。結果を OP_OUT に入れて 0 / 1 / 11 を返す) ----------
@@ -149,7 +163,7 @@ do_agent_new() {  # name cwd model role prompt killable by [spawned_by spawn_tas
   fi
   sql "UPDATE agents SET pane_id=$(q "$SPAWN_PANE"), spawned_by=NULLIF($(q "$sby"),''), spawn_task=NULLIF($(q "$stask"),'') WHERE name=$(q "$name");"
   OP_OUT="$name started (pane $SPAWN_PANE, cwd $cwd${model:+, model $model}${role:+, role $role})"
-  if [[ -n $prompt ]]; then first_prompt "$name" "$prompt" "$by" || OP_OUT+=" / 最初の指示は未送信(起動待ち。tb send などで送り直す)"; fi
+  if [[ -n $prompt ]]; then first_prompt "$name" "$prompt" "$by" || OP_OUT+=" / $FP_NOTE"; fi
   return 0
 }
 
@@ -201,7 +215,7 @@ do_agent_revive() {  # name fresh model prompt by
   sql "UPDATE agents SET pane_id=$(q "$SPAWN_PANE") WHERE name=$(q "$name");"
   local how="新しい会話"; [[ -z $sess ]] || how="resume $sess"
   OP_OUT="$name revived ($how, pane $SPAWN_PANE, cwd $cwd)"
-  if [[ -n $prompt ]]; then first_prompt "$name" "$prompt" "$by" || OP_OUT+=" / 指示は未送信(起動待ち)"; fi
+  if [[ -n $prompt ]]; then first_prompt "$name" "$prompt" "$by" || OP_OUT+=" / $FP_NOTE"; fi
   return 0
 }
 

@@ -7,7 +7,20 @@ case "$1 $2" in
     if [[ ${FAKE_STATUS:-idle} == missing ]]; then
       echo '{"error":{"code":"agent_not_found","message":"not found"}}'; exit 1
     fi
-    echo "{\"result\":{\"agent\":{\"agent_status\":\"${FAKE_STATUS:-idle}\"},\"type\":\"agent_info\"}}";;
+    # FAKE_READY_AFTER=N: 最初の N 回の get は interactive_ready=false(起動直後の UI 未準備)
+    ready=true
+    if [[ -n ${FAKE_READY_AFTER:-} ]]; then
+      n=$(( $(cat "$FAKE_LOG.ready" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$FAKE_LOG.ready"
+      (( n > FAKE_READY_AFTER )) || ready=false
+    fi
+    st=${FAKE_STATUS:-idle}
+    [[ -e $FAKE_LOG.working ]] && st=working   # 送信が受け付けられた後(FAKE_PROMPT_MODE)
+    echo "{\"result\":{\"agent\":{\"agent_status\":\"$st\",\"interactive_ready\":$ready},\"type\":\"agent_info\"}}";;
+  "agent send-keys")
+    printf 'keys %s\t%s\n' "$3" "${*:4}" >>"${FAKE_LOG:?}"
+    # swallow-once: 失われた Enter の代わりに、これで初めて送信される(= 動き出す)
+    [[ ${FAKE_PROMPT_MODE:-} == swallow-once && $4 == Enter ]] && : >"$FAKE_LOG.working"
+    echo '{"result":{"type":"ok"}}';;
   "agent list")
     echo "list" >>"${FAKE_LOG:?}"
     [[ ${FAKE_LIST_FAIL:-0} == 1 ]] && { echo '{"error":{"code":"x"}}'; exit 1; }
@@ -17,6 +30,8 @@ case "$1 $2" in
   "agent prompt")
     printf 'prompt %s\t%s\n' "$3" "$4" >>"${FAKE_LOG:?}"
     if [[ ${FAKE_PROMPT_RC:-0} != 0 ]]; then echo '{"error":{"code":"x"}}'; exit "$FAKE_PROMPT_RC"; fi
+    # FAKE_PROMPT_MODE: work=受け付けられて動き出す / swallow-once=Enter が失われ send-keys Enter で動く / swallow-always=動かない
+    [[ ${FAKE_PROMPT_MODE:-} == work ]] && : >"$FAKE_LOG.working"
     echo '{"result":{"type":"ok"}}';;
   "workspace create")
     echo "workspace-create $*" >>"${FAKE_LOG:?}"

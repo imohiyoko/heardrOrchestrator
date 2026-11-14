@@ -77,7 +77,7 @@ def make_env(name, **extra):
     env = dict(os.environ)
     env.pop("TB_UI_PORT", None)
     env.update(
-        WEBUI_FAIL_DELAY="0", HERDR_BIN=os.path.join(HERE, "fake", "herdr"), FAKE_HERDR_DIR=os.path.join(TMP, "fake"),
+        WEBUI_FAIL_DELAY="0", TB_PROMPT_VERIFY_SEC="0", HERDR_BIN=os.path.join(HERE, "fake", "herdr"), FAKE_HERDR_DIR=os.path.join(TMP, "fake"),
         WEBUI_RUN_DIR=os.path.join(d, "run"), WEBUI_TB_DB=os.path.join(d, "tasks.db"),
         WEBUI_SCHED_LOGS=os.path.join(d, "logs"), WEBUI_DISPATCH=os.path.join(d, "dispatch.jsonl"),
         WEBUI_SCHED_JOBS=os.path.join(d, "jobs"), WEBUI_SCHED_SETTINGS=os.path.join(d, "settings"))
