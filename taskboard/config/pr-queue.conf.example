@@ -1,0 +1,9 @@
+# tb pr-queue の設定(<キー> = <値>)。編集するのは人だけ。tb は毎回読む(再起動は要らない)。
+# 実際に読むのは pr-queue.conf(git 管理外)。使い始めるには: cp pr-queue.conf.example pr-queue.conf
+# 値の中に # は書けない(# から後ろはコメントとして捨てる)。
+
+branch_prefix = agent/        # キューに積めるブランチの接頭辞(英数字と . _ - の後に /)
+body_root =                   # 本文ファイルの置き場(空なら taskboard/data/pr-bodies)。この中の実ファイルだけを本文にできる
+body_first_line =             # 本文 1 行目が合うべき正規表現(例: ^Report: https://example\.com/r/[0-9]+$)。空なら見ない
+auto_approve = 0              # 1 なら scan で積んだものを approved にする(人の承認を飛ばす)。既定は 0
+max_create_per_run = 3        # 1 回の run で作る PR の上限
