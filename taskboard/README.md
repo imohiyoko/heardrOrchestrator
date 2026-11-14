@@ -200,6 +200,7 @@ tb agents [--json] [--all]          # 台帳と判定材料: 状態・killable�
 tb agent-new <名前> [--cwd D] [--model M] [--role R] [--prompt P] [--killable yes|no]
 tb agent-stop <名前> [--force]
 tb agent-revive <名前> [--fresh] [--model M] [--prompt P]
+tb agent-restart <名前> [--prompt P]   # MCP が切れたときの復旧: 停止 + 同じ会話での復活
 tb agent-flag <名前> --killable yes|no|unknown [--reason R]   # 判定役(sweeper*)か人だけ
 tb agent-ops [--status pending|done|failed|rejected] [--json]
 tb agent-approve L-<n> [--always] / tb agent-reject L-<n>      # 人だけ
@@ -212,6 +213,13 @@ tb agent-approve L-<n> [--always] / tb agent-reject L-<n>      # 人だけ
   止められるのは **killable=yes で、未完了(in_progress / review / blocked)のタスクを持っていない**ときだけ。人は `--force` で例外にできる。自分自身は止められない
 - **復活**: 台帳の cwd で新しい workspace を作り、`claude --resume <session>` で同じ会話から再開する。`--fresh` なら新しい会話。
   モデルは台帳の値か `--model`。復活したら判定フラグは `unknown` に戻る
+- **再起動**(`tb agent-restart <名前> [--prompt P]`): MCP の接続が切れた agent を、pane を閉じて `claude --resume` で同じ会話に戻して張り直す。killable の代わりに次の安全条件を全部見る
+  (`--force` は無い): 現在の herdr セッションで動いている / herdr の状態が `idle` か `done`(`working`・`blocked` は拒否) / in_progress のタスクを持たない
+  (持つときは `--prompt` の再開メモがあるときだけ) / session と cwd が台帳にあり会話を再開できる(だめなら止めずに拒否) / 動作中が `max_running_agents` を超えない。
+  人はいつでも実行できる。agent の pane からは自分自身と指揮官を除き、`agent:stop:<名前>` と `agent:revive:<名前>` が**両方 allow** のときだけ(それ以外は何もせず終了コード 4。承認待ちには積まない)。
+  `--prompt` が無ければ「MCP を再接続した。前の作業を続け、MCP のツールが使えることを確かめ、まだなら tb comment で報告」という既定の一文を送る(準備完了を待ち、受け付けられたかも確かめる)。
+  復活に失敗したら停止のまま残し、`tb agent-revive <名前> [--fresh]` を出して 0 以外で終わる(新しい会話は勝手に作らない)。
+  `agent_ops` には op=revive、args.restart=1 の 1 行で、依頼者・停止と復活の結果・session が変わらなかったか・所要秒を残す。再開したが最初の指示を確認できないときは終了コード 10
 - **判定フラグ(killable)**: `yes|no|unknown`。付けられるのは判定役(`roles/sweeper.md`、軽いモデル。`TB_SWEEPER_PATTERN`、既定 `sweeper*`)と人だけ。
   yes を付けた後でその agent が新しい入力を受けたら、または会話が変わったら `stale` になり、停止には使えない(付け直しが要る)。
   解析役(`analyst-A<n>`)は `tb alert-result` を返した時点で tb が yes を付ける。判定役の定期実行は `scheduler/jobs/sweeper.conf.example`

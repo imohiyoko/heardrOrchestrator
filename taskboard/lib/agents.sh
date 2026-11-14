@@ -183,11 +183,16 @@ do_agent_stop() {  # name force by
       return 1
     fi
   fi
-  herdr_close_pane "$pane" || { OP_OUT="pane $pane を閉じられません"; return 11; }
-  sql "UPDATE agents SET state='stopped', stopped_at=$(q "$(now)"), updated_at=$(q "$(now)"), pane_id=NULL,
-         session_id=COALESCE(NULLIF($(q "$sess"),''), session_id) WHERE name=$(q "$name");"
+  agent_close_pane "$name" "$pane" "$sess" || return $?
   sess=$(sql "SELECT COALESCE(session_id,'') FROM agents WHERE name=$(q "$name");")
   OP_OUT="$name stopped${sess:+ (session ${sess}。tb agent-revive $name で同じ会話から再開できます)}"
+}
+
+# pane を閉じて台帳を stopped にする(session は残す)。do_agent_stop と do_agent_restart が共有。失敗は 11
+agent_close_pane() {  # name pane session
+  herdr_close_pane "$2" || { OP_OUT="pane $2 を閉じられません"; return 11; }
+  sql "UPDATE agents SET state='stopped', stopped_at=$(q "$(now)"), updated_at=$(q "$(now)"), pane_id=NULL,
+         session_id=COALESCE(NULLIF($(q "$3"),''), session_id) WHERE name=$(q "$1");"
 }
 
 do_agent_revive() {  # name fresh model prompt by
@@ -216,6 +221,55 @@ do_agent_revive() {  # name fresh model prompt by
   local how="新しい会話"; [[ -z $sess ]] || how="resume $sess"
   OP_OUT="$name revived ($how, pane $SPAWN_PANE, cwd $cwd)"
   if [[ -n $prompt ]]; then first_prompt "$name" "$prompt" "$by" || OP_OUT+=" / $FP_NOTE"; fi
+  return 0
+}
+
+# 再起動 = 停止 + 同じ会話での復活(MCP の接続を張り直す)。killable の判定は見ない代わりに、次の安全条件を全部満たすときだけ:
+#   現在の herdr セッションで動いている / herdr の状態が idle か done / in_progress のタスクを持たない
+#   (持つなら idle/done かつ --prompt に再開メモがあるときだけ) / 会話を再開できる(session と cwd が分かる) / 自分自身ではない
+# 復活に失敗したら停止のまま残し、tb agent-revive の実行例を出す(勝手に新しい会話は作らない)。0 / 1 / 4 / 10(再開したが最初の指示を確認できない) / 11
+RESTART_DEFAULT_PROMPT='MCP の接続を張り直すために再起動しました。直前の作業を続けてください。まず MCP のツールが使えることを確認し、まだ使えないなら tb comment で報告してください。'
+do_agent_restart() {  # name prompt by
+  local name=$1 prompt=$2 by=$3 row pane sess cwd status open t0 old_sess new_sess rev how stoprc=0 rr=0 cur
+  t0=$(date +%s); FP_NOTE=""
+  agent_sync || { OP_OUT="herdr agent list に失敗しました"; return 11; }
+  row=$(live_row "$name")
+  [[ -n $row ]] || { other_session "$name" && return 1; OP_OUT="$name は動いていません(再起動は動いている agent だけ。止まっているなら tb agent-revive $name)"; return 1; }
+  ! other_session "$name" || return 1
+  [[ $by != "$name" ]] || { OP_OUT="自分自身は再起動できません"; return 1; }
+  pane=$(jq -r '.pane_id // ""' <<<"$row"); old_sess=$(jq -r '.agent_session.value // ""' <<<"$row")
+  status=$(jq -r '.agent_status // ""' <<<"$row")
+  [[ -n $pane ]] || { OP_OUT="$name の pane が分かりません"; return 1; }
+  case $status in idle|done) ;; *) OP_OUT="$name は ${status:-状態不明} のため再起動しません(idle か done のときだけ)"; return 1;; esac
+  open=$(sql "SELECT group_concat(id, ' ') FROM tasks WHERE owner_agent=$(q "$name") AND status='in_progress';")
+  if [[ -n $open ]] && blank "$prompt"; then
+    OP_OUT="$name は in_progress のタスク($open)を持っています。再開メモを --prompt で渡したときだけ再起動できます"; return 1
+  fi
+  [[ -n $old_sess ]] || old_sess=$(sql "SELECT COALESCE(session_id,'') FROM agents WHERE name=$(q "$name");")
+  cwd=$(sql "SELECT COALESCE(cwd,'') FROM agents WHERE name=$(q "$name");")
+  # 閉じてから再開できないと困るので、再開できることを先に確かめる(だめなら何も止めない)
+  [[ -n $old_sess ]] || { OP_OUT="$name の session id が台帳にありません。同じ会話に戻れないので止めません"; return 1; }
+  [[ -n $cwd && -d $cwd ]] || { OP_OUT="$name の作業ディレクトリがありません(${cwd:-未記録})。同じ会話に戻れないので止めません"; return 1; }
+  blank "$prompt" && prompt=$RESTART_DEFAULT_PROMPT
+  agent_close_pane "$name" "$pane" "$old_sess" || return $?
+  agent_sync || true
+  limits_refuse_running 1 >/dev/null 2>&1 || rr=$?
+  if ((rr)); then
+    OP_OUT="$name を停止しましたが、動作中の agent が上限のため復活していません。停止のままです。上限が空いたら: tb agent-revive $name [--fresh]"; return 4
+  fi
+  do_agent_revive "$name" 0 "" "$prompt" "$by" || rr=$?
+  if ((rr)); then
+    OP_OUT="$name を停止しました(pane $pane を閉じた)が、復活に失敗: ${OP_OUT}。停止のままです。自分で戻すなら: tb agent-revive $name [--fresh](--fresh は新しい会話になります)"
+    return "$rr"
+  fi
+  rev=$OP_OUT
+  agent_sync || true
+  cur=$(live_row "$name"); new_sess=$(jq -r '.agent_session.value // ""' <<<"$cur")
+  if [[ -z $new_sess ]]; then how="session unconfirmed (herdr reports none yet; was $old_sess)"
+  elif [[ $new_sess == "$old_sess" ]]; then how="同じ会話に戻った(session $old_sess のまま)"
+  else how="session CHANGED ($old_sess -> $new_sess; verify it is the same conversation)"; fi
+  OP_OUT="$name restarted by $by: stop ok(pane $pane を閉じた) / revive ok(${rev#"$name revived "}) / $how / $(( $(date +%s) - t0 )) 秒"
+  if [[ -n $FP_NOTE ]]; then OP_OUT+=" / $FP_NOTE"; return 10; fi
   return 0
 }
 
@@ -309,6 +363,46 @@ cmd_agent-revive() {
   limits_refuse_running 1 || return 4   # 復活も動作中を 1 つ増やす
   op_entry revive "$name" "$(jq -nc --argjson f "$fresh" --arg m "$model" --arg p "$prompt" \
     '{fresh:$f} + (if $m=="" then {} else {model:$m} end) + (if $p=="" then {} else {prompt:$p} end)')"
+}
+
+# 再起動(MCP が切れた agent の復旧)。人はいつでも。agent の pane からは自分以外・指揮官以外で、
+# agent:stop:<名前> と agent:revive:<名前> の両方が allow のときだけ(それ以外は何もせず拒否 = 終了コード 4。承認待ちには積まない)
+# agent_ops には op=revive、args.restart=1 で 1 行だけ残す(CHECK 制約は変えない)
+cmd_agent-restart() {
+  [[ $# -ge 1 && $1 != -* ]] || usage "agent-restart <名前> [--prompt P]"
+  local name=$1 prompt="" r=0 args; shift
+  valid_agent_name "$name"
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --prompt) need_arg "$@"; prompt=$2; shift 2;;
+      *) usage "agent-restart: 不明な引数 $1(--force はありません)";;
+    esac
+  done
+  [[ ${#prompt} -le 4000 ]] || usage "agent-restart: --prompt は 4000 字まで"
+  args=$(jq -nc --arg p "$prompt" '{restart:1} + (if $p=="" then {} else {prompt:$p} end)')
+  requester
+  if [[ $REQ_BY != human ]]; then
+    local why="" n s v
+    if [[ $REQ_BY == "$name" ]]; then why="自分自身は再起動できません"
+    else
+      while IFS= read -r n; do [[ $n == "$name" ]] && why="指揮官($name)は agent から再起動できません(人が実行します)"; done < <(conductor_names)
+    fi
+    if [[ -z $why ]]; then
+      approval_of "agent:stop:$name"; s=$APPROVAL_VALUE
+      approval_of "agent:revive:$name"; v=$APPROVAL_VALUE
+      [[ $s == allow && $v == allow ]] || why="approvals で agent:stop:$name と agent:revive:$name の両方が allow ではありません(stop=$s revive=$v)。人が実行するか、人が許可してください"
+    fi
+    if [[ -n $why ]]; then
+      sql "INSERT INTO agent_ops (op, target, args, requested_by, status, result, created_at, decided_at)
+        VALUES ('revive', $(q "$name"), $(q "$args"), $(q "$REQ_BY"), 'rejected', $(q "restart refused: $why"), $(q "$(now)"), $(q "$(now)"));" >/dev/null
+      echo "tb: $why" >&2; return 4
+    fi
+  fi
+  limits_refuse_running 0 || return 4   # 動作中が既に上限を超えているときは触らない(再起動で数は増えない)
+  do_agent_restart "$name" "$prompt" "$REQ_BY" || r=$?
+  record_op revive "$name" "$args" "$REQ_BY" "$r" "restart: $OP_OUT"
+  if ((r == 0)); then echo "$OP_OUT"; else echo "tb: $OP_OUT" >&2; fi
+  return $r
 }
 
 # 判定役(または人)が「止めてよいか」を付ける
