@@ -1,0 +1,12 @@
+# tb digest の scheduler 見張り(<キー> = <値>)。編集するのは人だけ。再起動は要らない(tb は毎回読む)。
+# 実際に読むのは sched-watch.conf。無ければこの .example の値を使う。
+# 使い始めるには: そのままでよい(既定で有効)。止めたいときは cp sched-watch.conf.example sched-watch.conf して enabled = 0
+# 読むだけ: scheduler/logs/*.log と、ジョブの実効設定(scheduler/bin/show.sh)。launchd・scheduler の設定は変えない。
+# 同じ観測は、状態が変わるまで 1 回だけ digest に出る。
+
+enabled = 1            # 0 のあいだは何も観測しない
+disabled_min = 30      # ENABLED=0 のまま skipped_disabled が、この分数以上続いているジョブを出す
+watch_stale_min = 20   # 見張り系ジョブ(tb limits の watchers が TARGET か COMMAND にある)で、ran がこの分数以上無ければ出す
+fail_window_min = 60   # 失敗率を見る期間(分)
+fail_min_runs = 5      # この回数以上実行(ran + failed)があったときだけ失敗率を見る
+fail_rate_pct = 50     # failed の割合(%)がこれ以上なら出す

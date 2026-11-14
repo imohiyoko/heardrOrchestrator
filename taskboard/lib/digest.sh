@@ -111,6 +111,7 @@ collect_digest() {
     sql "DELETE FROM observations WHERE kind='blocked' AND key NOT IN (${current}'');"
   fi
   collect_spawn_obs
+  collect_sched_obs
 }
 
 # 6. 観測: tb agent-spawn の子。何も無ければ(子が動いていなければ)何も出さない
