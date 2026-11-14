@@ -111,11 +111,11 @@ collect_digest() {
 #    - 子の数が上限の 1 つ手前以上(全体、または 1 体の親)
 #    - 親のタスクが done / blocked になったのに、子がまだ動いている
 collect_spawn_obs() {
-  [[ -n $(sql "SELECT 1 FROM agents WHERE spawned_by IS NOT NULL AND state='running' LIMIT 1;") ]] || { sql "DELETE FROM observations WHERE kind IN ('spawnlimit','spawnorphan');"; return 0; }
+  [[ -n $(sql "SELECT 1 FROM agents WHERE spawned_by IS NOT NULL AND state='running' AND herdr_session=$(q "$HSESS") LIMIT 1;") ]] || { sql "DELETE FROM observations WHERE kind IN ('spawnlimit','spawnorphan');"; return 0; }
   agent_sync 2>/dev/null || true
   load_spawn_policy
   local current="" id parent n key project task st
-  n=$(sql "SELECT COUNT(*) FROM agents WHERE spawned_by IS NOT NULL AND state='running';")
+  n=$(sql "SELECT COUNT(*) FROM agents WHERE spawned_by IS NOT NULL AND state='running' AND herdr_session=$(q "$HSESS");")
   if ((SP_TOTAL > 0 && n >= SP_TOTAL - 1)); then
     key="spawnlimit:total:$n"; current+="$(q "$key"),"
     obs_seen "$key" || add_item "$DEFAULT_TARGET" obs "spawn" "$key" "" spawnlimit "spawn 観測 / 全体" \
@@ -127,7 +127,7 @@ collect_spawn_obs() {
     key="spawnlimit:$parent:$n"; current+="$(q "$key"),"
     obs_seen "$key" || add_item "$DEFAULT_TARGET" obs "spawn" "$key" "" spawnlimit "spawn 観測 / $parent" \
       "$parent の子が $n 体動いている(1 体の親あたりの上限 $SP_PER)"
-  done < <(sql -separator $'\t' "SELECT spawned_by, COUNT(*) FROM agents WHERE spawned_by IS NOT NULL AND state='running' GROUP BY spawned_by ORDER BY spawned_by;")
+  done < <(sql -separator $'\t' "SELECT spawned_by, COUNT(*) FROM agents WHERE spawned_by IS NOT NULL AND state='running' AND herdr_session=$(q "$HSESS") GROUP BY spawned_by ORDER BY spawned_by;")
   while IFS=$'\t' read -r id parent task st project; do
     [[ -n $id ]] || continue
     key="spawnorphan:$id:$task:$st"; current+="$(q "$key"),"
@@ -135,7 +135,7 @@ collect_spawn_obs() {
     add_item "$(target_for "$project")" obs "$task" "$key" "$task" spawnorphan "$task 観測 / $parent" \
       "親のタスクが $st になったが、子 $id はまだ動いている(止めるなら tb agent-stop $id)"
   done < <(sql -separator $'\t' "SELECT a.name, a.spawned_by, a.spawn_task, t.status, t.project FROM agents a JOIN tasks t ON t.id=a.spawn_task
-             WHERE a.spawned_by IS NOT NULL AND a.state='running' AND t.status IN ('done','blocked') ORDER BY a.name;")
+             WHERE a.spawned_by IS NOT NULL AND a.state='running' AND a.herdr_session=$(q "$HSESS") AND t.status IN ('done','blocked') ORDER BY a.name;")
   # 条件が外れたものは記録を消す(再び当てはまったら、また送る)
   sql "DELETE FROM observations WHERE kind IN ('spawnlimit','spawnorphan') AND key NOT IN (${current}'');"
 }

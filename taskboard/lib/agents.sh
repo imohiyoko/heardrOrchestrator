@@ -53,8 +53,8 @@ agent_sync() {
     | map(tostring | gsub("[\u001f\n]"; " ")) | join("\u001f")' <<<"$LIVE_AGENTS")
   local name pane sess cwd stmts="" names="''"
   while IFS=$'\x1f' read -r name pane sess cwd; do
+    names+=",$(q "$name")"   # 台帳の規則に合わない名前(解析役 analyst-A<n> など)も「いる」ものとして扱い、勝手に stopped にしない
     [[ $name =~ $AGENT_NAME_RE ]] || continue
-    names+=",$(q "$name")"
     stmts+="INSERT INTO agents (name, herdr_session, pane_id, session_id, cwd, state, killable, created_by, created_at, updated_at)
       VALUES ($(q "$name"), $(q "$HSESS"), NULLIF($(q "$pane"),''), NULLIF($(q "$sess"),''),
               COALESCE((SELECT cwd FROM agent_activity WHERE session_id=$(q "$sess") AND cwd IS NOT NULL), NULLIF($(q "$cwd"),'')),
@@ -259,6 +259,7 @@ cmd_agent-new() {
   # 承認する側のカレントで解決されないよう、依頼時に絶対パスにする(存在の検査は実行時に do_agent_new が行う)
   [[ $cwd == /* ]] || cwd=$PWD/$cwd
   [[ ! -d $cwd ]] || cwd=$(cd "$cwd" && pwd)
+  limits_refuse_running 1 || return 4   # 動作中が上限なら、承認待ちにも積まず拒否(max_running_agents)
   op_entry new "$name" "$(jq -nc --arg c "$cwd" --arg m "$model" --arg r "$role" --arg p "$prompt" --arg k "$kill" \
     '{cwd:$c} + (if $m=="" then {} else {model:$m} end) + (if $r=="" then {} else {role:$r} end) + (if $p=="" then {} else {prompt:$p} end) + {killable:$k}')"
 }
@@ -291,6 +292,7 @@ cmd_agent-revive() {
   done
   [[ -z $model || $model =~ $MODEL_RE ]] || usage "agent-revive: --model に使えない文字があります: $model"
   [[ ${#prompt} -le 4000 ]] || usage "agent-revive: --prompt は 4000 字まで"
+  limits_refuse_running 1 || return 4   # 復活も動作中を 1 つ増やす
   op_entry revive "$name" "$(jq -nc --argjson f "$fresh" --arg m "$model" --arg p "$prompt" \
     '{fresh:$f} + (if $m=="" then {} else {model:$m} end) + (if $p=="" then {} else {prompt:$p} end)')"
 }
@@ -386,7 +388,9 @@ cmd_agent-approve() {
   [[ -n $row ]] || die "操作が見つかりません: L-$id"
   [[ $(jq -r .status <<<"$row") == pending ]] || die "L-$id は承認待ちではありません($(jq -r .status <<<"$row"))"
   op=$(jq -r .op <<<"$row"); target=$(jq -r .target <<<"$row"); args=$(jq -r .args <<<"$row"); by=$(jq -r .requested_by <<<"$row")
-  if [[ $op == new && -n $(jq -r '.spawn.parent // ""' <<<"$args") ]]; then spawn_recheck "$id" "$args" || return 1; fi
+  if [[ $op == new && -n $(jq -r '.spawn.parent // ""' <<<"$args") ]]; then spawn_recheck "$id" "$args" || return 1
+  elif [[ $op == new || $op == revive ]]; then limits_refuse_running 1 || return 4   # 承認待ちの間に上限へ達していたら、承認待ちのまま残す
+  fi
   ((always)) && set_approval allow "agent:$op:$target" >/dev/null && echo "agent:$op:$target = allow(今後は承認なし)"
   run_op "$op" "$target" "$args" "$by" || r=$?
   record_op "$op" "$target" "$args" "$by" "$r" "$OP_OUT / 人が承認" "$id"
