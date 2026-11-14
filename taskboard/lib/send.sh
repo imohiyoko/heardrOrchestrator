@@ -8,6 +8,28 @@
 ROUTES=${TB_ROUTES:-$TB_ROOT/config/routes.conf}
 SEND_KINDS="task info answer"
 SEND_MAX=${TB_SEND_MAX:-4000}
+# tb approve / tb flush が HERDR_SESSION 未指定のときに向ける herdr セッション(明示した HERDR_SESSION が常に優先)。
+# 空なら herdr の既定のセッション。scheduler から flush するときに、決まったセッションへ向けるために使う
+OUTBOX_SESSION=${TB_OUTBOX_SESSION:-}
+
+# outbox_deliver を、HERDR_SESSION 未指定なら OUTBOX_SESSION に向けて呼ぶ
+outbox_deliver_default() {  # $1=outbox.id
+  if [[ -z ${HERDR_SESSION:-} && -n $OUTBOX_SESSION ]]; then HERDR_SESSION=$OUTBOX_SESSION outbox_deliver "$1"
+  else outbox_deliver "$1"; fi
+}
+
+# flush の前に、台帳を herdr の一覧と突き合わせる(台帳の stopped が古いままのことがある)。失敗なら 1
+outbox_sync() {
+  local HSESS=${HERDR_SESSION:-${OUTBOX_SESSION:-default}}   # agent_sync が見るセッション
+  if [[ -z ${HERDR_SESSION:-} && -n $OUTBOX_SESSION ]]; then HERDR_SESSION=$OUTBOX_SESSION agent_sync
+  else agent_sync; fi
+} >/dev/null 2>&1
+
+# 宛先が tb の台帳で停止中(agent-stop 済み、または herdr の一覧から消えた)か。
+# 停止中の宛先には送らず queued のまま残す(revive 後の flush で届く)。outbox_sync のあとでだけ使う
+outbox_target_stopped() {  # $1=宛先
+  [[ -n $(sql "SELECT 1 FROM agents WHERE name=$(q "$1") AND state='stopped' LIMIT 1;" 2>/dev/null) ]]
+}
 
 # 指揮官として扱う名前: 既定の宛先と projects.conf の値
 conductor_names() {
@@ -112,14 +134,23 @@ cmd_send() {
   return $rc
 }
 
-# 積まれた送信を届ける。宛先ごとに古い順で、使用中の宛先は次回に回す
+# 積まれた送信を届ける。宛先ごとに古い順で、使用中の宛先は次回に回す。
+# 停止中の宛先には送らず飛ばす(毎回の失敗を記録しない。revive すれば次の flush で届く)。
+# 停止中かは、最初に 1 回 herdr の一覧と台帳を突き合わせて決める
 cmd_flush() {
   [[ $# -eq 0 ]] || usage "flush(引数なし)"
-  local oid target rc=0 r busy=" "
+  local oid target rc=0 r busy=" " held=" " synced=0
+  [[ -n $(sql "SELECT 1 FROM outbox WHERE status='queued' LIMIT 1;") ]] || return 0
+  outbox_sync && synced=1   # herdr に届かなければ判定せず、今までどおり送ってみる
   while IFS=$'\t' read -r oid target; do
     [[ -n $oid ]] || continue
-    [[ $busy == *" $target "* ]] && continue   # 同じ宛先の後続は順序を保つため送らない
-    r=0; outbox_deliver "$oid" || r=$?
+    [[ $busy == *" $target "* || $held == *" $target "* ]] && continue   # 同じ宛先の後続は順序を保つため送らない
+    if ((synced)) && outbox_target_stopped "$target"; then
+      held+="$target "
+      echo "tb: 宛先 '$target' は停止中のため送りません(queued のまま。tb agent-revive $target のあとの flush で届きます)" >&2
+      continue
+    fi
+    r=0; outbox_deliver_default "$oid" || r=$?
     if ((r)); then busy+="$target "; ((r > rc)) && rc=$r; fi
   done < <(sql -separator $'\t' "SELECT id, target FROM outbox WHERE status='queued' ORDER BY id;")
   return $rc

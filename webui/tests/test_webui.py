@@ -293,7 +293,7 @@ p = start(env)
 port = wait_port(env, p)
 check("起動して port が分かる", port is not None)
 cl = Client(port)
-PAGES = ["/", "/notifications", "/agents", "/agents/alpha", "/tasks", "/tasks/T-1", "/inbox", "/jobs", "/ledger"]
+PAGES = ["/", "/notifications", "/agents", "/agents/alpha", "/tasks", "/tasks/T-1", "/inbox", "/outbox", "/jobs", "/ledger"]
 
 # ---- 初回設定
 for path in PAGES:
@@ -446,6 +446,24 @@ r = cl.get("/api/notifications")
 _it = [it for it in json.loads(r[2])["items"] if it["id"].startswith("o:")] if r[0] == 200 else []
 check("送信の承認待ちが通知に出る(承認コマンド付き)", [it["id"] for it in _it] == ["o:1"] and "tb approve O-1" in _it[0]["body"], str(_it))
 check("送信の承認待ちは /notifications でエスケープ", "&lt;b&gt;x&lt;/b&gt;" in cl.get("/notifications")[2])
+# outbox 一覧(読み取り専用。queued が 60 秒超なら強調)
+from datetime import datetime, timedelta, timezone
+_old = (datetime.now(timezone.utc) - timedelta(seconds=300)).strftime("%Y-%m-%dT%H:%M:%SZ")
+_new = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+_c = sqlite3.connect(env["WEBUI_TB_DB"])
+_c.execute("INSERT INTO outbox (from_name,from_pane,from_session,target,kind,task_id,text,status,created_at) VALUES ('conductor','w0:p1','s','w9','info','T-1',?,'queued',?)", ("古い<script>alert(1)</script>" + "x" * 200, _old))
+_c.execute("INSERT INTO outbox (from_name,from_pane,from_session,target,kind,text,status,created_at) VALUES ('conductor','w0:p1','s','w8','info','新しい','queued',?)", (_new,))
+_c.commit(); _c.close()
+ob = cl.get("/outbox")
+check("/outbox は 200", ob[0] == 200)
+check("outbox は pending/sent/queued を全部出す", all(x in ob[2] for x in (">pending<", ">sent<", "w8", "w9")))
+check("outbox の本文はエスケープ", "<script>alert(1)" not in ob[2] and "&lt;script&gt;" in ob[2])
+check("outbox の本文は先頭 80 文字まで", "x" * 80 not in ob[2] and "x" * 40 in ob[2])
+check("queued が 60 秒超の行だけ強調", ob[2].count("<span class=warn>queued</span>") == 1, str(ob[2].count("<span class=warn>queued</span>")))
+check("outbox は新しい順", ob[2].index("O-4") < ob[2].index("O-3") < ob[2].index("O-1"))
+check("outbox に操作フォームなし", "<form action" not in ob[2].split("</nav>", 1)[1] and "approve</button" not in ob[2])
+check("POST /outbox は 405", cl.raw("POST", "/outbox", {"a": "b"})[0] == 405)
+check("未ログインの /outbox は /login へ", Client(port).get("/outbox")[0] == 302)
 _c = sqlite3.connect(env["WEBUI_TB_DB"])
 _c.executescript("INSERT INTO alerts (fingerprint,source,first_seen,last_seen,severity,title,status,result_summary,analyzed_at) VALUES ('f1','watch','t0','t0','critical','API <i>5xx</i>','analyzed','設定漏れ','t1');"
                  "INSERT INTO alerts (fingerprint,source,first_seen,last_seen,severity,title,status,result_summary,analyzed_at) VALUES ('f2','watch','t0','t0','low','軽微','analyzed','誤報','t2');"

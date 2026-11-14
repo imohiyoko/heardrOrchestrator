@@ -161,6 +161,28 @@ def _short(s, n=200):
     return s[:n] + ("…" if len(s) > n else "")
 
 
+OUTBOX_LIST_MAX = 100
+QUEUED_WARN_SEC = 60
+
+
+def outbox_rows():
+    """outbox の一覧(読み取り専用)。新しい順に最大 100 件。text は先頭 80 文字だけ。
+
+    age_sec は created_at からの経過秒(解釈できなければ None)。stuck は queued のまま QUEUED_WARN_SEC 超。
+    """
+    now = datetime.now(timezone.utc)
+    out = []
+    for o in q("SELECT id, from_name, target, kind, task_id, status, text, created_at FROM outbox ORDER BY id DESC LIMIT ?",
+               (OUTBOX_LIST_MAX,)):
+        t = parse_ts(o.get("created_at"))
+        age = max(0, int((now - t).total_seconds())) if t else None
+        out.append({"id": o["id"], "from_name": clean(o["from_name"]), "target": clean(o["target"]), "kind": clean(o["kind"]),
+                    "task_id": clean(o.get("task_id") or ""), "status": clean(o["status"]), "age_sec": age,
+                    "text": _short(o["text"], 80),
+                    "stuck": o["status"] == "queued" and age is not None and age > QUEUED_WARN_SEC})
+    return out
+
+
 def failed_jobs():
     """最後の実行(ran/failed/sent)が failed のジョブ。[(job, record)]。"""
     try:
